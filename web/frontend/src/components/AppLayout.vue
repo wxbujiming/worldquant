@@ -126,7 +126,7 @@ onMounted(() => {
   height: 100%;
 }
 .sider {
-  background-color: #1e1e2e;
+  background-color: #fafafa;
 }
 .sider-header {
   display: flex;
@@ -139,7 +139,7 @@ onMounted(() => {
 .sider-title {
   font-size: 18px;
   font-weight: 700;
-  color: #fff;
+  color: #333;
 }
 .sider-footer {
   display: flex;
@@ -147,12 +147,12 @@ onMounted(() => {
   justify-content: center;
   gap: 8px;
   padding: 12px;
-  color: #aaa;
+  color: #888;
   font-size: 12px;
 }
 .content {
   padding: 24px;
-  background-color: #16161e;
+  background-color: #fff;
   min-height: 100%;
 }
 </style>

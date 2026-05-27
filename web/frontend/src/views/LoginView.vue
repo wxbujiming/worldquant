@@ -136,7 +136,7 @@ onMounted(async () => {
   align-items: center;
   justify-content: center;
   height: 100%;
-  background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 100%);
+  background: linear-gradient(135deg, #e8edf5 0%, #f5f7fa 100%);
 }
 .login-card {
   width: 400px;
