@@ -1,9 +1,10 @@
 <template>
   <div>
     <n-h2>数据集</n-h2>
+
     <n-card style="margin-bottom: 16px">
       <n-grid :cols="24" x-gap="12" y-gap="12">
-        <n-gi :span="6">
+        <n-gi :span="5">
           <n-select
             v-model:value="filters.region"
             :options="regionOptions"
@@ -11,14 +12,14 @@
             filterable
           />
         </n-gi>
-        <n-gi :span="6">
+        <n-gi :span="5">
           <n-select
             v-model:value="filters.delay"
             :options="delayOptions"
             placeholder="Delay"
           />
         </n-gi>
-        <n-gi :span="6">
+        <n-gi :span="5">
           <n-select
             v-model:value="filters.universe"
             :options="universeOptions"
@@ -26,9 +27,23 @@
             filterable
           />
         </n-gi>
-        <n-gi :span="6">
-          <n-button type="primary" @click="handleSearch" :loading="loading">
+        <n-gi :span="3">
+          <n-button type="primary" @click="handleSearch" :loading="loading" block>
             搜索
+          </n-button>
+        </n-gi>
+        <n-gi :span="3">
+          <n-button @click="handleSync" :loading="syncing" block>
+            缓存
+          </n-button>
+        </n-gi>
+        <n-gi :span="3">
+          <n-button
+            :type="useCache ? 'primary' : 'default'"
+            @click="toggleSource"
+            block
+          >
+            {{ useCache ? "本地" : "在线" }}
           </n-button>
         </n-gi>
       </n-grid>
@@ -45,7 +60,7 @@
     />
 
     <n-card v-if="!loading && datasets.length === 0" style="margin-top: 16px">
-      <n-empty description="选择筛选条件后点击搜索" />
+      <n-empty description="无数据" />
     </n-card>
   </div>
 </template>
@@ -57,13 +72,16 @@ import { useMessage } from "naive-ui";
 import type { DataTableColumn } from "naive-ui";
 import { NTag, NButton } from "naive-ui";
 import { searchDatasets } from "@/api/datasets";
+import { getCachedDatasets, syncDatasets } from "@/api/cache";
 import type { SearchDatasetsParams } from "@/api/datasets";
 
 const router = useRouter();
 const message = useMessage();
 
 const loading = ref(false);
+const syncing = ref(false);
 const datasets = ref<any[]>([]);
+const useCache = ref(false);
 
 const filters = reactive({
   region: "usa",
@@ -88,11 +106,7 @@ const universeOptions = [
 ];
 
 const columns: DataTableColumn[] = [
-  {
-    title: "ID",
-    key: "id",
-    width: 80,
-  },
+  { title: "ID", key: "id", width: 80 },
   { title: "名称", key: "name", ellipsis: { tooltip: true } },
   {
     title: "区域",
@@ -112,7 +126,8 @@ const columns: DataTableColumn[] = [
     title: "覆盖",
     key: "coverage",
     width: 80,
-    render: (row: any) => (row.coverage != null ? `${(row.coverage * 100).toFixed(1)}%` : ""),
+    render: (row: any) =>
+      row.coverage != null ? `${(row.coverage * 100).toFixed(1)}%` : "",
   },
   {
     title: "评分",
@@ -141,7 +156,6 @@ const columns: DataTableColumn[] = [
 const pagination = reactive({
   page: 1,
   pageSize: 50,
-  showSizePicker: false,
   onChange: (page: number) => {
     pagination.page = page;
     handleSearch();
@@ -151,19 +165,45 @@ const pagination = reactive({
 async function handleSearch() {
   loading.value = true;
   try {
-    const params: SearchDatasetsParams = {
-      region: filters.region,
-      delay: filters.delay,
-      universe: filters.universe,
-      limit: pagination.pageSize,
-      offset: (pagination.page - 1) * pagination.pageSize,
-    };
-    const res = await searchDatasets(params);
-    datasets.value = res.data.results ?? res.data.datasets ?? [];
+    if (useCache.value) {
+      const res = await getCachedDatasets({
+        region: filters.region,
+        delay: filters.delay,
+        universe: filters.universe,
+      });
+      datasets.value = res.data.results ?? [];
+    } else {
+      const params: SearchDatasetsParams = {
+        region: filters.region,
+        delay: filters.delay,
+        universe: filters.universe,
+        limit: pagination.pageSize,
+        offset: (pagination.page - 1) * pagination.pageSize,
+      };
+      const res = await searchDatasets(params);
+      datasets.value = res.data.results ?? res.data.datasets ?? [];
+    }
   } catch (err: any) {
     message.error(err?.response?.data?.detail || "查询失败");
   } finally {
     loading.value = false;
   }
+}
+
+async function handleSync() {
+  syncing.value = true;
+  try {
+    const res = await syncDatasets(filters.region, filters.delay, filters.universe);
+    message.success(res.data.message);
+  } catch (err: any) {
+    message.error(err?.response?.data?.detail || "同步失败");
+  } finally {
+    syncing.value = false;
+  }
+}
+
+async function toggleSource() {
+  useCache.value = !useCache.value;
+  await handleSearch();
 }
 </script>
