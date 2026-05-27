@@ -184,12 +184,29 @@ def sync_datasets(session) -> int:
             category = cat.get("id") if isinstance(cat, dict) else (cat or "")
             ds_type = item.get("type")
             ds_type_str = ds_type.get("id") if isinstance(ds_type, dict) else (ds_type or "")
-            # 组合唯一 ID（同一基础 ID 可能有不同 region/delay/universe）
             composite_id = f"{ds_id}__{region}__{delay}__{universe}"
-            exists = conn.execute(
-                "SELECT 1 FROM datasets WHERE id = ?", (composite_id,)
+            new_name = item.get("name", "")
+            new_coverage = item.get("coverage")
+            new_value_score = item.get("valueScore")
+            new_theme = 1 if item.get("themes") else 0
+            new_raw = json.dumps(item)
+
+            existing = conn.execute(
+                """SELECT name, coverage, value_score, theme, category, type
+                   FROM datasets WHERE id = ?""",
+                (composite_id,),
             ).fetchone()
-            if exists:
+            if existing:
+                if (existing["name"] != new_name or existing["coverage"] != new_coverage
+                        or existing["value_score"] != new_value_score
+                        or existing["theme"] != new_theme or existing["category"] != category
+                        or existing["type"] != ds_type_str):
+                    conn.execute(
+                        """UPDATE datasets SET name=?, category=?, coverage=?, value_score=?, theme=?, type=?, raw_data=?
+                           WHERE id=?""",
+                        (new_name, category, new_coverage, new_value_score, new_theme, ds_type_str, new_raw, composite_id),
+                    )
+                    total += 1
                 continue
             conn.execute(
                 """INSERT INTO datasets
@@ -198,16 +215,16 @@ def sync_datasets(session) -> int:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     composite_id,
-                    item.get("name", ""),
+                    new_name,
                     region,
                     delay,
                     universe,
                     category,
-                    item.get("coverage"),
-                    item.get("valueScore"),
-                    1 if item.get("themes") else 0,
+                    new_coverage,
+                    new_value_score,
+                    new_theme,
                     ds_type_str,
-                    json.dumps(item),
+                    new_raw,
                 ),
             )
             total += 1
@@ -248,11 +265,12 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
 
     遍历缓存数据集列表，每个条目自带 region/delay/universe。
     指定 dataset_id 时只同步该数据集的所有组合。
+    dataset_id 为 None 时只同步当前字段数为 0 的数据集。
     """
     import time
+    from .wqb_service import logger
     conn = _get_conn()
     total = 0
-    # 缓存数据集列表每条就是一个组合（含 region/delay/universe 顶层字段）
     datasets = get_cached_datasets()
     seen = set()
     for ds in datasets:
@@ -270,6 +288,15 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
         seen.add(combo_key)
         if not region or delay is None or not universe:
             continue
+
+        # 全量同步时跳过已有字段的数据集（节省时间 + 避免限流）
+        if not dataset_id:
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM fields WHERE dataset_id = ?", (d_id,)
+            ).fetchone()[0]
+            if existing > 0:
+                continue
+
         offset = 0
         limit = 50
         while True:
@@ -278,7 +305,14 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
                 region=region, delay=delay, universe=universe,
                 dataset_id=d_id, limit=limit, offset=offset,
             )
+            # 检测 API 错误（限流、session 过期等），避免静默失败
+            if not resp.ok:
+                logger.warning(f"fields API error: {resp.status_code} {resp.text[:200]} for {combo_key}")
+                break
             data = resp.json()
+            if isinstance(data, list):
+                logger.warning(f"fields API returned list (likely error): {data} for {combo_key}")
+                break
             items = data.get("results") or []
             if not items:
                 break
@@ -286,24 +320,43 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
                 f_id = str(item.get("id", ""))
                 if not f_id:
                     continue
-                exists = conn.execute(
-                    "SELECT 1 FROM fields WHERE id = ?", (f_id,)
-                ).fetchone()
-                if exists:
-                    continue
                 cat = item.get("category")
                 category_str = json.dumps(cat) if isinstance(cat, dict) else (cat or "")
+                new_name = item.get("name", "")
+                new_type = item.get("type", "")
+                new_coverage = item.get("coverage")
+                new_ds_id = item.get("dataset", {}).get("id", "") if isinstance(item.get("dataset"), dict) else ""
+
+                existing = conn.execute(
+                    "SELECT name, type, category, coverage, raw_data FROM fields WHERE id = ?", (f_id,)
+                ).fetchone()
+                if existing:
+                    # 对比关键字段，有变更则更新
+                    old_name = existing["name"]
+                    old_type = existing["type"]
+                    old_cat = existing["category"]
+                    old_coverage = existing["coverage"]
+                    if (old_name != new_name or old_type != new_type
+                            or old_cat != category_str
+                            or old_coverage != new_coverage):
+                        conn.execute(
+                            """UPDATE fields SET name=?, dataset_id=?, type=?, category=?, coverage=?, raw_data=?
+                               WHERE id=?""",
+                            (new_name, new_ds_id, new_type, category_str, new_coverage, json.dumps(item), f_id),
+                        )
+                        total += 1
+                    continue
                 conn.execute(
                     """INSERT INTO fields
                        (id, name, dataset_id, type, category, coverage, raw_data)
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (
                         f_id,
-                        item.get("name", ""),
-                        item.get("dataset", {}).get("id", "") if isinstance(item.get("dataset"), dict) else "",
-                        item.get("type", ""),
+                        new_name,
+                        new_ds_id,
+                        new_type,
                         category_str,
-                        item.get("coverage"),
+                        new_coverage,
                         json.dumps(item),
                     ),
                 )

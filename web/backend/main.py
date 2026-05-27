@@ -26,10 +26,10 @@ async def lifespan(app: FastAPI):
                 except Exception as e:
                     print(f"算子缓存失败: {e}")
 
-            ds_synced = get_synced_at("datasets_usa_1_top3000")
+            ds_synced = get_synced_at("datasets")
             if not ds_synced:
                 try:
-                    c = sync_datasets(session, "usa", 1, "top3000")
+                    c = sync_datasets(session)
                     print(f"已缓存 {c} 个数据集")
                 except Exception as e:
                     print(f"数据集缓存失败: {e}")

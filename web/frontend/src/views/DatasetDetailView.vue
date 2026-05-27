@@ -44,6 +44,9 @@
       <n-alert v-if="fieldsMsg" type="info" closable style="margin-bottom: 12px">
         {{ fieldsMsg }}
       </n-alert>
+      <n-text depth="3" style="font-size: 12px; padding: 0 0 8px 4px; display: block">
+        共 {{ fieldsTotal }} 条，当前页 {{ fieldsPageCount }} 条
+      </n-text>
       <n-data-table
         :columns="fieldColumns"
         :data="fields"
@@ -51,13 +54,14 @@
         :bordered="false"
         :single-line="false"
         size="small"
+        :pagination="fieldsPagination"
       />
     </n-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, h, onMounted } from "vue";
+import { ref, h, reactive, computed, onMounted } from "vue";
 import { useRoute } from "vue-router";
 import { useMessage } from "naive-ui";
 import type { DataTableColumn } from "naive-ui";
@@ -73,6 +77,24 @@ const dataset = ref<any>(null);
 const fields = ref<any[]>([]);
 const fieldsLoading = ref(false);
 const fieldsMsg = ref("");
+
+const fieldsPagination = reactive({
+  page: 1,
+  pageSize: 20,
+  pageSizes: [20, 50, 100],
+  showSizePicker: true,
+  onChange: (page: number) => { fieldsPagination.page = page; },
+  onUpdatePageSize: (pageSize: number) => {
+    fieldsPagination.pageSize = pageSize;
+    fieldsPagination.page = 1;
+  },
+});
+
+const fieldsTotal = computed(() => fields.value.length);
+const fieldsPageCount = computed(() => {
+  const start = (fieldsPagination.page - 1) * fieldsPagination.pageSize;
+  return Math.min(fieldsPagination.pageSize, Math.max(0, fieldsTotal.value - start));
+});
 
 const dataColumns: DataTableColumn[] = [
   { title: "区域", key: "region", width: 80 },
@@ -149,7 +171,7 @@ async function loadFields() {
       fields.value = items;
       fieldsMsg.value = `共 ${items.length} 个字段`;
     } else {
-      fieldsMsg.value = "该数据集暂未同步字段，点击"同步字段"按钮从 WB 拉取";
+      fieldsMsg.value = '该数据集暂未同步字段，点击「同步字段」按钮从 WB 拉取';
     }
   } catch {
     fieldsMsg.value = "加载字段失败";
