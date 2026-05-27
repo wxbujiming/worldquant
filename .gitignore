@@ -28,3 +28,7 @@ Thumbs.db
 
 # Build artifacts
 web/frontend/dist/
+
+# Local cache database
+web/backend/cache/
+*.db

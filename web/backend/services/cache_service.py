@@ -15,8 +15,7 @@ def _get_conn() -> sqlite3.Connection:
         os.makedirs(DB_DIR, exist_ok=True)
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA journal_mode=DELETE")
         _local.conn = conn
     return _local.conn
 
@@ -86,7 +85,12 @@ def set_synced_at(data_type: str):
 def sync_operators(session) -> int:
     resp = session.search_operators()
     data = resp.json()
-    items = data.get("results") or data.get("operators") or data
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("results") or data.get("operators") or data
+    else:
+        items = [data]
     if isinstance(items, dict):
         items = [items]
     conn = _get_conn()
