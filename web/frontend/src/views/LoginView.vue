@@ -41,6 +41,16 @@
         >
           登录
         </n-button>
+        <n-button
+          v-if="hasCredentials"
+          block
+          dashed
+          style="margin-top: 8px"
+          :loading="loading"
+          @click="handleAutoLogin"
+        >
+          使用配置文件中的账号登录
+        </n-button>
       </n-form>
       <template #footer>
         <n-text depth="3" style="font-size: 12px">
@@ -52,17 +62,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from "vue";
+import { ref, reactive, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useMessage } from "naive-ui";
 import type { FormInst, FormRules } from "naive-ui";
 import { useAuthStore } from "@/stores/auth";
+import { getStatus } from "@/api/auth";
 
 const router = useRouter();
 const message = useMessage();
 const auth = useAuthStore();
 const formRef = ref<FormInst | null>(null);
 const loading = ref(false);
+const hasCredentials = ref(false);
 
 const form = reactive({
   email: "",
@@ -86,6 +98,36 @@ async function handleLogin() {
     loading.value = false;
   }
 }
+
+async function handleAutoLogin() {
+  loading.value = true;
+  try {
+    const { loginWithEnv } = await import("@/api/auth");
+    const res = await loginWithEnv();
+    auth.authenticated = true;
+    auth.email = res.data.email;
+    message.success("登录成功");
+    router.push("/");
+  } catch (err: any) {
+    message.error(err?.response?.data?.detail || "登录失败");
+  } finally {
+    loading.value = false;
+  }
+}
+
+onMounted(async () => {
+  try {
+    const res = await getStatus();
+    if (res.data.authenticated) {
+      auth.authenticated = true;
+      auth.email = res.data.email || "";
+      router.push("/");
+    }
+    hasCredentials.value = !!res.data.has_credentials;
+  } catch {
+    // ignore
+  }
+});
 </script>
 
 <style scoped>

@@ -8,10 +8,15 @@ export interface LoginRequest {
 export interface AuthStatus {
   authenticated: boolean;
   email?: string;
+  has_credentials?: boolean;
 }
 
 export function login(data: LoginRequest) {
   return client.post("/auth/login", data);
+}
+
+export function loginWithEnv() {
+  return client.post("/auth/login/env");
 }
 
 export function logout() {
