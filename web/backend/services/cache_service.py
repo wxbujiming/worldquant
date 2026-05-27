@@ -243,46 +243,77 @@ def get_cached_datasets(region: str | None = None,
 
 # ── Fields ─────────────────────────────────────────────────
 
-def sync_fields(session, region: str, delay: int, universe: str,
-                dataset_id: str | None = None) -> int:
+def sync_fields(session, dataset_id: str | None = None) -> int:
+    """同步字段。
+
+    遍历缓存数据集列表，每个条目自带 region/delay/universe。
+    指定 dataset_id 时只同步该数据集的所有组合。
+    """
+    import time
     conn = _get_conn()
-    count = 0
-    kw = dict(region=region, delay=delay, universe=universe, limit=50)
-    if dataset_id:
-        kw["dataset_id"] = dataset_id
-    for resp in session.search_fields(**kw):
-        data = resp.json()
-        items = data.get("results") or data.get("fields") or []
-        for item in items:
-            f_id = str(item.get("id", ""))
-            if not f_id:
-                continue
-            exists = conn.execute(
-                "SELECT 1 FROM fields WHERE id = ?", (f_id,)
-            ).fetchone()
-            if exists:
-                continue
-            conn.execute(
-                """INSERT INTO fields
-                   (id, name, dataset_id, type, category, coverage, raw_data)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    str(item.get("id", "")),
-                    item.get("name", ""),
-                    item.get("dataset", {}).get("id", "") if isinstance(item.get("dataset"), dict) else "",
-                    item.get("type", ""),
-                    item.get("category", ""),
-                    item.get("coverage"),
-                    json.dumps(item),
-                ),
+    total = 0
+    # 缓存数据集列表每条就是一个组合（含 region/delay/universe 顶层字段）
+    datasets = get_cached_datasets()
+    seen = set()
+    for ds in datasets:
+        d_id = ds.get("id", "")
+        if not d_id:
+            continue
+        if dataset_id and d_id != dataset_id:
+            continue
+        region = ds.get("region")
+        delay = ds.get("delay")
+        universe = ds.get("universe")
+        combo_key = f"{d_id}|{region}|{delay}|{universe}"
+        if combo_key in seen:
+            continue
+        seen.add(combo_key)
+        if not region or delay is None or not universe:
+            continue
+        offset = 0
+        limit = 50
+        while True:
+            time.sleep(1.1)
+            resp = session.search_fields_limited(
+                region=region, delay=delay, universe=universe,
+                dataset_id=d_id, limit=limit, offset=offset,
             )
-            count += 1
-    tag = f"fields_{region}_{delay}_{universe}"
-    if dataset_id:
-        tag += f"_{dataset_id}"
-    set_synced_at(tag)
+            data = resp.json()
+            items = data.get("results") or []
+            if not items:
+                break
+            for item in items:
+                f_id = str(item.get("id", ""))
+                if not f_id:
+                    continue
+                exists = conn.execute(
+                    "SELECT 1 FROM fields WHERE id = ?", (f_id,)
+                ).fetchone()
+                if exists:
+                    continue
+                cat = item.get("category")
+                category_str = json.dumps(cat) if isinstance(cat, dict) else (cat or "")
+                conn.execute(
+                    """INSERT INTO fields
+                       (id, name, dataset_id, type, category, coverage, raw_data)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        f_id,
+                        item.get("name", ""),
+                        item.get("dataset", {}).get("id", "") if isinstance(item.get("dataset"), dict) else "",
+                        item.get("type", ""),
+                        category_str,
+                        item.get("coverage"),
+                        json.dumps(item),
+                    ),
+                )
+                total += 1
+            if len(items) < limit:
+                break
+            offset += limit
+    set_synced_at("fields")
     conn.commit()
-    return count
+    return total
 
 
 def get_cached_fields(dataset_id: str | None = None) -> list[dict]:

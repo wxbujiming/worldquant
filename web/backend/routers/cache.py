@@ -46,14 +46,11 @@ def do_sync_datasets(session=Depends(require_session)):
 
 @router.post("/sync/fields")
 def do_sync_fields(
-    region: str = Query("usa"),
-    delay: int = Query(1),
-    universe: str = Query("top3000"),
     dataset_id: str | None = None,
     session=Depends(require_session),
 ):
     init_db()
-    count = sync_fields(session, region, delay, universe, dataset_id)
+    count = sync_fields(session, dataset_id)
     return {"message": f"已同步 {count} 个字段"}
 
 

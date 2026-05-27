@@ -67,7 +67,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed } from "vue";
 import { useMessage } from "naive-ui";
-import { getCacheStats, syncOperators, syncDatasets, syncFields, syncAlphas } from "@/api/cache";
+import { getCacheStats, syncOperators, syncDatasets, syncAlphas } from "@/api/cache";
 
 const message = useMessage();
 const loading = ref(false);
@@ -107,8 +107,6 @@ async function syncAll() {
     message.success(op.data.message);
     const ds = await syncDatasets();
     message.success(ds.data.message);
-    const f = await syncFields();
-    message.success(f.data.message);
     const a = await syncAlphas();
     message.success(a.data.message);
     await refreshStats();

@@ -36,23 +36,43 @@
     </n-card>
 
     <n-card title="数据字段" style="margin-top: 16px">
-      <n-empty description="WorldQuant Brain 的字段查询接口 (data-fields) 已不可用，暂无法获取字段列表" />
+      <template #header-extra>
+        <n-button size="small" @click="handleSyncFields" :loading="fieldsLoading">
+          同步字段
+        </n-button>
+      </template>
+      <n-alert v-if="fieldsMsg" type="info" closable style="margin-bottom: 12px">
+        {{ fieldsMsg }}
+      </n-alert>
+      <n-data-table
+        :columns="fieldColumns"
+        :data="fields"
+        :loading="fieldsLoading"
+        :bordered="false"
+        :single-line="false"
+        size="small"
+      />
     </n-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, h, onMounted } from "vue";
 import { useRoute } from "vue-router";
 import { useMessage } from "naive-ui";
 import type { DataTableColumn } from "naive-ui";
+import { NTag } from "naive-ui";
 import { getDataset } from "@/api/datasets";
+import { getCachedFields, syncFields } from "@/api/cache";
 
 const route = useRoute();
 const message = useMessage();
 
 const loading = ref(true);
 const dataset = ref<any>(null);
+const fields = ref<any[]>([]);
+const fieldsLoading = ref(false);
+const fieldsMsg = ref("");
 
 const dataColumns: DataTableColumn[] = [
   { title: "区域", key: "region", width: 80 },
@@ -77,6 +97,32 @@ const dataColumns: DataTableColumn[] = [
   { title: "日期覆盖", key: "dateCoverage", width: 90 },
 ];
 
+const fieldColumns: DataTableColumn[] = [
+  { title: "ID", key: "id", width: 120, ellipsis: { tooltip: true } },
+  { title: "Name", key: "name", ellipsis: { tooltip: true } },
+  { title: "描述", key: "description", ellipsis: { tooltip: true } },
+  {
+    title: "类别",
+    key: "category",
+    width: 100,
+    render: (row: any) => {
+      const cat = row.category;
+      let label = "";
+      if (typeof cat === "object") label = cat?.name || cat?.id || "";
+      else try { const p = JSON.parse(cat); label = p?.name || p?.id || cat; } catch { label = cat; }
+      return label ? h(NTag, { size: "small" }, { default: () => label }) : "—";
+    },
+  },
+  { title: "类型", key: "type", width: 80 },
+  {
+    title: "覆盖度",
+    key: "coverage",
+    width: 80,
+    render: (row: any) =>
+      row.coverage != null ? `${(row.coverage * 100).toFixed(1)}%` : "",
+  },
+];
+
 async function loadData() {
   const id = route.params.id as string;
   loading.value = true;
@@ -87,6 +133,44 @@ async function loadData() {
     message.error("加载数据集失败");
   } finally {
     loading.value = false;
+  }
+  await loadFields();
+}
+
+async function loadFields() {
+  if (!dataset.value) return;
+  const dsId = dataset.value.id;
+  fieldsLoading.value = true;
+  fieldsMsg.value = "";
+  try {
+    const res = await getCachedFields(dsId);
+    const items = res.data.results ?? [];
+    if (items.length > 0) {
+      fields.value = items;
+      fieldsMsg.value = `共 ${items.length} 个字段`;
+    } else {
+      fieldsMsg.value = "该数据集暂未同步字段，点击"同步字段"按钮从 WB 拉取";
+    }
+  } catch {
+    fieldsMsg.value = "加载字段失败";
+  } finally {
+    fieldsLoading.value = false;
+  }
+}
+
+async function handleSyncFields() {
+  if (!dataset.value) return;
+  fieldsLoading.value = true;
+  fieldsMsg.value = "正在同步字段...";
+  try {
+    const res = await syncFields(dataset.value.id);
+    message.success(res.data.message);
+    await loadFields();
+  } catch (err: any) {
+    message.error(err?.response?.data?.detail || "同步字段失败");
+    fieldsMsg.value = "";
+  } finally {
+    fieldsLoading.value = false;
   }
 }
 

@@ -12,14 +12,9 @@ export function syncDatasets() {
   return client.post("/cache/sync/datasets");
 }
 
-export function syncFields(
-  region = "usa",
-  delay = 1,
-  universe = "top3000",
-  dataset_id?: string
-) {
+export function syncFields(dataset_id?: string) {
   return client.post("/cache/sync/fields", null, {
-    params: { region, delay, universe, dataset_id },
+    params: { dataset_id },
   });
 }
 
