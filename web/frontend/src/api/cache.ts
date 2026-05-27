@@ -8,10 +8,8 @@ export function syncOperators() {
   return client.post("/cache/sync/operators");
 }
 
-export function syncDatasets(region = "usa", delay = 1, universe = "top3000") {
-  return client.post("/cache/sync/datasets", null, {
-    params: { region, delay, universe },
-  });
+export function syncDatasets() {
+  return client.post("/cache/sync/datasets");
 }
 
 export function syncFields(
@@ -39,4 +37,16 @@ export function getCachedDatasets(params?: {
 
 export function getCachedFields(dataset_id?: string) {
   return client.get("/cache/fields", { params: { dataset_id } });
+}
+
+export function updateOperatorRemarks(opId: string, remarks: string) {
+  return client.patch(`/cache/operators/${encodeURIComponent(opId)}/remarks`, { remarks });
+}
+
+export function syncAlphas() {
+  return client.post("/cache/sync/alphas");
+}
+
+export function getCachedAlphas() {
+  return client.get("/cache/alphas");
 }

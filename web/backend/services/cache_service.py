@@ -34,6 +34,7 @@ def init_db():
             description TEXT,
             type TEXT,
             category TEXT,
+            remarks TEXT DEFAULT '',
             raw_data TEXT
         );
 
@@ -60,7 +61,18 @@ def init_db():
             coverage REAL,
             raw_data TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS alphas (
+            id TEXT PRIMARY KEY,
+            raw_data TEXT
+        );
     """)
+    # 兼容旧表：添加缺失的列
+    for col in ("remarks",):
+        try:
+            conn.execute(f"ALTER TABLE operators ADD COLUMN {col} TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
 
 
@@ -96,16 +108,25 @@ def sync_operators(session) -> int:
     conn = _get_conn()
     count = 0
     for item in items:
+        op_name = item.get("name", "")
+        if not op_name:
+            continue
+        exists = conn.execute(
+            "SELECT 1 FROM operators WHERE id = ?", (op_name,)
+        ).fetchone()
+        if exists:
+            continue
         conn.execute(
-            """INSERT OR REPLACE INTO operators
-               (id, name, description, type, category, raw_data)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO operators
+               (id, name, description, type, category, remarks, raw_data)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
-                str(item.get("id", "")),
-                item.get("name", ""),
+                op_name,
+                op_name,
                 item.get("description", ""),
                 item.get("type", ""),
                 item.get("category", ""),
+                "",
                 json.dumps(item),
             ),
         )
@@ -122,38 +143,80 @@ def get_cached_operators() -> list[dict]:
     return [json.loads(r["raw_data"]) for r in rows]
 
 
+def update_operator_remarks(op_id: str, remarks: str):
+    _get_conn().execute(
+        "UPDATE operators SET remarks = ? WHERE id = ?", (remarks, op_id)
+    )
+    _get_conn().commit()
+
+
+def get_operator_remarks(op_id: str) -> str:
+    row = _get_conn().execute(
+        "SELECT remarks FROM operators WHERE id = ?", (op_id,)
+    ).fetchone()
+    return row["remarks"] if row else ""
+
+
 # ── Datasets ───────────────────────────────────────────────
 
-def sync_datasets(session, region: str, delay: int, universe: str) -> int:
+def sync_datasets(session) -> int:
+    """同步所有数据集，不再按 region/delay/universe 过滤（API 已变更）。"""
     conn = _get_conn()
-    count = 0
-    for resp in session.search_datasets(region=region, delay=delay, universe=universe, limit=50):
+    total = 0
+    offset = 0
+    limit = 50
+    while True:
+        resp = session.get(
+            f"https://api.worldquantbrain.com/data-sets?limit={limit}&offset={offset}"
+        )
         data = resp.json()
-        items = data.get("results") or data.get("datasets") or []
+        items = data.get("results") or []
+        if not items:
+            break
         for item in items:
+            ds_id = str(item.get("id", ""))
+            if not ds_id:
+                continue
+            region = (item.get("region") or "").lower()
+            delay = item.get("delay", 0)
+            universe = (item.get("universe") or "").lower()
+            cat = item.get("category")
+            category = cat.get("id") if isinstance(cat, dict) else (cat or "")
+            ds_type = item.get("type")
+            ds_type_str = ds_type.get("id") if isinstance(ds_type, dict) else (ds_type or "")
+            # 组合唯一 ID（同一基础 ID 可能有不同 region/delay/universe）
+            composite_id = f"{ds_id}__{region}__{delay}__{universe}"
+            exists = conn.execute(
+                "SELECT 1 FROM datasets WHERE id = ?", (composite_id,)
+            ).fetchone()
+            if exists:
+                continue
             conn.execute(
-                """INSERT OR REPLACE INTO datasets
+                """INSERT INTO datasets
                    (id, name, region, delay, universe, category,
                     coverage, value_score, theme, type, raw_data)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    str(item.get("id", "")),
+                    composite_id,
                     item.get("name", ""),
                     region,
                     delay,
                     universe,
-                    item.get("category", ""),
+                    category,
                     item.get("coverage"),
                     item.get("valueScore"),
-                    1 if item.get("theme") else 0,
-                    item.get("type", ""),
+                    1 if item.get("themes") else 0,
+                    ds_type_str,
                     json.dumps(item),
                 ),
             )
-            count += 1
-    set_synced_at(f"datasets_{region}_{delay}_{universe}")
+            total += 1
+        if len(items) < limit:
+            break
+        offset += limit
+    set_synced_at("datasets")
     conn.commit()
-    return count
+    return total
 
 
 def get_cached_datasets(region: str | None = None,
@@ -191,8 +254,16 @@ def sync_fields(session, region: str, delay: int, universe: str,
         data = resp.json()
         items = data.get("results") or data.get("fields") or []
         for item in items:
+            f_id = str(item.get("id", ""))
+            if not f_id:
+                continue
+            exists = conn.execute(
+                "SELECT 1 FROM fields WHERE id = ?", (f_id,)
+            ).fetchone()
+            if exists:
+                continue
             conn.execute(
-                """INSERT OR REPLACE INTO fields
+                """INSERT INTO fields
                    (id, name, dataset_id, type, category, coverage, raw_data)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
@@ -227,6 +298,48 @@ def get_cached_fields(dataset_id: str | None = None) -> list[dict]:
     return [json.loads(r["raw_data"]) for r in rows]
 
 
+# ── Alphas ───────────────────────────────────────────────
+
+def sync_alphas(session) -> int:
+    conn = _get_conn()
+    count = 0
+    offset = 0
+    limit = 100
+    while True:
+        resp = session.filter_alphas_limited(limit=limit, offset=offset)
+        data = resp.json()
+        items = data.get("results") or data.get("alphas") or []
+        if not items:
+            break
+        for item in items:
+            a_id = str(item.get("id", ""))
+            if not a_id:
+                continue
+            exists = conn.execute(
+                "SELECT 1 FROM alphas WHERE id = ?", (a_id,)
+            ).fetchone()
+            if exists:
+                continue
+            conn.execute(
+                "INSERT INTO alphas (id, raw_data) VALUES (?, ?)",
+                (a_id, json.dumps(item)),
+            )
+            count += 1
+        if len(items) < limit:
+            break
+        offset += limit
+    set_synced_at("alphas")
+    conn.commit()
+    return count
+
+
+def get_cached_alphas() -> list[dict]:
+    rows = _get_conn().execute(
+        "SELECT raw_data FROM alphas ORDER BY id"
+    ).fetchall()
+    return [json.loads(r["raw_data"]) for r in rows]
+
+
 # ── Statistics ─────────────────────────────────────────────
 
 def get_stats() -> dict:
@@ -235,6 +348,7 @@ def get_stats() -> dict:
         "operators": conn.execute("SELECT COUNT(*) FROM operators").fetchone()[0],
         "datasets": conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0],
         "fields": conn.execute("SELECT COUNT(*) FROM fields").fetchone()[0],
+        "alphas": conn.execute("SELECT COUNT(*) FROM alphas").fetchone()[0],
         "last_sync": {
             row["data_type"]: row["synced_at"]
             for row in conn.execute("SELECT * FROM sync_meta").fetchall()

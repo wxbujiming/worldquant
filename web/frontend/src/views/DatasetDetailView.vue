@@ -7,93 +7,74 @@
       ← 返回
     </n-button>
     <n-h2>{{ dataset.name }}</n-h2>
-    <n-description :title="`ID: ${dataset.id}`" />
+    <n-text depth="3">{{ dataset.description }}</n-text>
 
     <n-grid :cols="4" x-gap="16" y-gap="16" style="margin: 16px 0">
       <n-gi>
-        <n-statistic label="Region" :value="dataset.region" />
+        <n-statistic label="类型" :value="dataset.category?.name ?? dataset.category ?? '—'" />
       </n-gi>
       <n-gi>
-        <n-statistic
-          label="Coverage"
-          :value="dataset.coverage != null ? (dataset.coverage * 100).toFixed(1) + '%' : '—'"
-        />
+        <n-statistic label="子类" :value="dataset.subcategory?.name ?? dataset.subcategory ?? '—'" />
       </n-gi>
       <n-gi>
-        <n-statistic label="Value Score" :value="dataset.valueScore?.toFixed(2) ?? '—'" />
+        <n-statistic label="数据集 ID" :value="dataset.id" />
       </n-gi>
       <n-gi>
-        <n-statistic label="Dataset Type" :value="dataset.type ?? '—'" />
+        <n-statistic label="研究论文" :value="dataset.researchPapers ?? 0" />
       </n-gi>
     </n-grid>
 
-    <n-card title="数据字段" style="margin-top: 16px">
-      <template #header-extra>
-        <n-select
-          v-model:value="fieldFilters.type"
-          :options="fieldTypeOptions"
-          placeholder="字段类型"
-          clearable
-          style="width: 140px"
-          @update:value="loadFields"
-        />
-      </template>
+    <n-card title="各配置覆盖情况" style="margin-top: 16px">
       <n-data-table
-        :columns="fieldColumns"
-        :data="fields"
-        :loading="fieldsLoading"
+        :columns="dataColumns"
+        :data="dataset.data ?? []"
         :bordered="false"
         :single-line="false"
         size="small"
+        :max-height="300"
       />
+    </n-card>
+
+    <n-card title="数据字段" style="margin-top: 16px">
+      <n-empty description="WorldQuant Brain 的字段查询接口 (data-fields) 已不可用，暂无法获取字段列表" />
     </n-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, h, onMounted } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { ref, onMounted } from "vue";
+import { useRoute } from "vue-router";
 import { useMessage } from "naive-ui";
 import type { DataTableColumn } from "naive-ui";
-import { NTag } from "naive-ui";
 import { getDataset } from "@/api/datasets";
-import { searchFields as searchApiFields } from "@/api/fields";
 
 const route = useRoute();
-const router = useRouter();
 const message = useMessage();
 
 const loading = ref(true);
 const dataset = ref<any>(null);
-const fields = ref<any[]>([]);
-const fieldsLoading = ref(false);
 
-const fieldFilters = ref<{ type: string | null }>({ type: null });
-
-const fieldTypeOptions = [
-  { label: "全部", value: null },
-  { label: "因子 (factor)", value: "factor" },
-  { label: "原始数据 (raw)", value: "raw" },
-];
-
-const fieldColumns: DataTableColumn[] = [
-  { title: "ID", key: "id", width: 80 },
-  { title: "Name", key: "name", ellipsis: { tooltip: true } },
-  { title: "Type", key: "type", width: 100 },
+const dataColumns: DataTableColumn[] = [
+  { title: "区域", key: "region", width: 80 },
+  { title: "延迟", key: "delay", width: 70 },
+  { title: "股票池", key: "universe", width: 100 },
   {
-    title: "Category",
-    key: "category",
-    width: 100,
-    render: (row: any) =>
-      row.category ? h(NTag, { size: "small" }, { default: () => row.category }) : "",
-  },
-  {
-    title: "Coverage",
+    title: "覆盖度",
     key: "coverage",
-    width: 80,
+    width: 90,
     render: (row: any) =>
-      row.coverage != null ? `${(row.coverage * 100).toFixed(1)}%` : "",
+      row.coverage != null ? `${(row.coverage * 100).toFixed(1)}%` : "—",
   },
+  {
+    title: "价值评分",
+    key: "valueScore",
+    width: 100,
+    render: (row: any) => row.valueScore?.toFixed(2) ?? "—",
+  },
+  { title: "Alpha 数", key: "alphaCount", width: 90 },
+  { title: "用户数", key: "userCount", width: 80 },
+  { title: "字段数", key: "fieldCount", width: 80 },
+  { title: "日期覆盖", key: "dateCoverage", width: 90 },
 ];
 
 async function loadData() {
@@ -106,26 +87,6 @@ async function loadData() {
     message.error("加载数据集失败");
   } finally {
     loading.value = false;
-  }
-  await loadFields();
-}
-
-async function loadFields() {
-  if (!dataset.value) return;
-  fieldsLoading.value = true;
-  try {
-    const res = await searchApiFields({
-      region: dataset.value.region,
-      delay: 1,
-      universe: "top3000",
-      dataset_id: dataset.value.id,
-      type: fieldFilters.value.type ?? undefined,
-    });
-    fields.value = res.data.results ?? res.data.fields ?? [];
-  } catch {
-    fields.value = [];
-  } finally {
-    fieldsLoading.value = false;
   }
 }
 

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 from ..dependencies import require_session
 from ..services.cache_service import (
     init_db,
@@ -6,11 +7,19 @@ from ..services.cache_service import (
     sync_operators,
     sync_datasets,
     sync_fields,
+    sync_alphas,
     get_cached_operators,
     get_cached_datasets,
     get_cached_fields,
+    get_cached_alphas,
     get_synced_at,
+    update_operator_remarks,
+    get_operator_remarks,
 )
+
+
+class RemarksBody(BaseModel):
+    remarks: str
 
 router = APIRouter(prefix="/api/cache", tags=["cache"])
 
@@ -29,14 +38,9 @@ def do_sync_operators(session=Depends(require_session)):
 
 
 @router.post("/sync/datasets")
-def do_sync_datasets(
-    region: str = Query("usa"),
-    delay: int = Query(1),
-    universe: str = Query("top3000"),
-    session=Depends(require_session),
-):
+def do_sync_datasets(session=Depends(require_session)):
     init_db()
-    count = sync_datasets(session, region, delay, universe)
+    count = sync_datasets(session)
     return {"message": f"已同步 {count} 个数据集"}
 
 
@@ -56,7 +60,18 @@ def do_sync_fields(
 @router.get("/operators")
 def cached_operators():
     init_db()
-    return {"results": get_cached_operators(), "cached": True}
+    items = get_cached_operators()
+    # 附加 remarks 字段
+    for item in items:
+        item["remarks"] = get_operator_remarks(item.get("name", ""))
+    return {"results": items, "cached": True}
+
+
+@router.patch("/operators/{op_id}/remarks")
+def patch_operator_remarks(op_id: str, body: RemarksBody):
+    init_db()
+    update_operator_remarks(op_id, body.remarks)
+    return {"message": "备注已更新"}
 
 
 @router.get("/datasets")
@@ -74,4 +89,18 @@ def cached_datasets(
 def cached_fields(dataset_id: str | None = None):
     init_db()
     items = get_cached_fields(dataset_id)
+    return {"results": items, "count": len(items), "cached": True}
+
+
+@router.post("/sync/alphas")
+def do_sync_alphas(session=Depends(require_session)):
+    init_db()
+    count = sync_alphas(session)
+    return {"message": f"已同步 {count} 个 Alpha"}
+
+
+@router.get("/alphas")
+def cached_alphas():
+    init_db()
+    items = get_cached_alphas()
     return {"results": items, "count": len(items), "cached": True}

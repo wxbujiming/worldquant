@@ -16,6 +16,9 @@
             <n-descriptions-item label="数据字段">
               <n-number-animation :from="0" :to="stats.fields" />
             </n-descriptions-item>
+            <n-descriptions-item label="Alpha">
+              <n-number-animation :from="0" :to="stats.alphas ?? 0" />
+            </n-descriptions-item>
             <n-descriptions-item label="上次同步">
               {{ lastSyncText || "从未同步" }}
             </n-descriptions-item>
@@ -64,7 +67,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed } from "vue";
 import { useMessage } from "naive-ui";
-import { getCacheStats, syncOperators, syncDatasets, syncFields } from "@/api/cache";
+import { getCacheStats, syncOperators, syncDatasets, syncFields, syncAlphas } from "@/api/cache";
 
 const message = useMessage();
 const loading = ref(false);
@@ -74,6 +77,7 @@ const stats = reactive({
   operators: 0,
   datasets: 0,
   fields: 0,
+  alphas: 0,
   last_sync: {} as Record<string, string>,
 });
 
@@ -105,6 +109,8 @@ async function syncAll() {
     message.success(ds.data.message);
     const f = await syncFields();
     message.success(f.data.message);
+    const a = await syncAlphas();
+    message.success(a.data.message);
     await refreshStats();
     message.success("全部同步完成");
   } catch (err: any) {

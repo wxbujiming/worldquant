@@ -4,27 +4,30 @@
 
     <n-card style="margin-bottom: 16px">
       <n-grid :cols="24" x-gap="12" y-gap="12">
-        <n-gi :span="5">
+        <n-gi :span="6">
           <n-select
             v-model:value="filters.region"
             :options="regionOptions"
             placeholder="Region"
             filterable
+            clearable
           />
         </n-gi>
-        <n-gi :span="5">
+        <n-gi :span="6">
           <n-select
             v-model:value="filters.delay"
             :options="delayOptions"
             placeholder="Delay"
+            clearable
           />
         </n-gi>
-        <n-gi :span="5">
+        <n-gi :span="6">
           <n-select
             v-model:value="filters.universe"
             :options="universeOptions"
             placeholder="Universe"
             filterable
+            clearable
           />
         </n-gi>
         <n-gi :span="3">
@@ -34,16 +37,7 @@
         </n-gi>
         <n-gi :span="3">
           <n-button @click="handleSync" :loading="syncing" block>
-            缓存
-          </n-button>
-        </n-gi>
-        <n-gi :span="3">
-          <n-button
-            :type="useCache ? 'primary' : 'default'"
-            @click="toggleSource"
-            block
-          >
-            {{ useCache ? "本地" : "在线" }}
+            同步
           </n-button>
         </n-gi>
       </n-grid>
@@ -66,22 +60,19 @@
 </template>
 
 <script setup lang="ts">
-import { h, ref, reactive } from "vue";
+import { h, ref, reactive, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useMessage } from "naive-ui";
 import type { DataTableColumn } from "naive-ui";
 import { NTag, NButton } from "naive-ui";
-import { searchDatasets } from "@/api/datasets";
 import { getCachedDatasets, syncDatasets } from "@/api/cache";
-import type { SearchDatasetsParams } from "@/api/datasets";
 
 const router = useRouter();
 const message = useMessage();
 
-const loading = ref(false);
+const loading = ref(true);
 const syncing = ref(false);
 const datasets = ref<any[]>([]);
-const useCache = ref(false);
 
 const filters = reactive({
   region: "usa",
@@ -96,13 +87,15 @@ const regionOptions = [
   { label: "Global", value: "global" },
 ];
 
-const delayOptions = [1, 2, 3, 4].map((v) => ({ label: `${v}`, value: v }));
+const delayOptions = [0, 1, 2, 3, 4].map((v) => ({ label: `${v}`, value: v }));
 
 const universeOptions = [
   { label: "TOP3000", value: "top3000" },
   { label: "TOP2000", value: "top2000" },
   { label: "TOP1000", value: "top1000" },
   { label: "TOP500", value: "top500" },
+  { label: "TOP200", value: "top200" },
+  { label: "TOPSP500", value: "topsp500" },
 ];
 
 const columns: DataTableColumn[] = [
@@ -119,8 +112,11 @@ const columns: DataTableColumn[] = [
     title: "分类",
     key: "category",
     width: 100,
-    render: (row: any) =>
-      row.category ? h(NTag, { size: "small" }, { default: () => row.category }) : "",
+    render: (row: any) => {
+      const cat = row.category;
+      const label = typeof cat === "object" ? cat?.name || cat?.id : cat;
+      return label ? h(NTag, { size: "small" }, { default: () => label }) : "";
+    },
   },
   {
     title: "覆盖",
@@ -165,24 +161,12 @@ const pagination = reactive({
 async function handleSearch() {
   loading.value = true;
   try {
-    if (useCache.value) {
-      const res = await getCachedDatasets({
-        region: filters.region,
-        delay: filters.delay,
-        universe: filters.universe,
-      });
-      datasets.value = res.data.results ?? [];
-    } else {
-      const params: SearchDatasetsParams = {
-        region: filters.region,
-        delay: filters.delay,
-        universe: filters.universe,
-        limit: pagination.pageSize,
-        offset: (pagination.page - 1) * pagination.pageSize,
-      };
-      const res = await searchDatasets(params);
-      datasets.value = res.data.results ?? res.data.datasets ?? [];
-    }
+    const res = await getCachedDatasets({
+      region: filters.region,
+      delay: filters.delay,
+      universe: filters.universe,
+    });
+    datasets.value = res.data.results ?? [];
   } catch (err: any) {
     message.error(err?.response?.data?.detail || "查询失败");
   } finally {
@@ -193,8 +177,9 @@ async function handleSearch() {
 async function handleSync() {
   syncing.value = true;
   try {
-    const res = await syncDatasets(filters.region, filters.delay, filters.universe);
+    const res = await syncDatasets();
     message.success(res.data.message);
+    await handleSearch();
   } catch (err: any) {
     message.error(err?.response?.data?.detail || "同步失败");
   } finally {
@@ -202,8 +187,5 @@ async function handleSync() {
   }
 }
 
-async function toggleSource() {
-  useCache.value = !useCache.value;
-  await handleSearch();
-}
+onMounted(handleSearch);
 </script>

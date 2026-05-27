@@ -3,31 +3,20 @@
     <n-h2>算子浏览器</n-h2>
 
     <n-card style="margin-bottom: 16px">
-      <n-space>
+      <n-space justify="space-between">
         <n-input
           v-model:value="searchText"
           placeholder="搜索算子..."
           clearable
-          style="flex: 1"
+          style="min-width: 300px; flex: 1"
           @input="filterOperators"
         />
-        <n-button
-          v-if="!useCache"
-          type="primary"
-          @click="handleSync"
-          :loading="syncing"
-        >
-          缓存到本地
-        </n-button>
-        <n-button
-          :type="useCache ? 'primary' : 'default'"
-          @click="toggleSource"
-        >
-          {{ useCache ? "查看在线数据" : "查看本地缓存" }}
+        <n-button type="primary" @click="handleSync" :loading="syncing">
+          同步
         </n-button>
       </n-space>
-      <n-text v-if="useCache" depth="3" style="font-size: 12px">
-        当前显示本地缓存数据（{{ operators.length }} 条）
+      <n-text depth="3" style="font-size: 12px">
+        共 {{ operators.length }} 条
       </n-text>
     </n-card>
 
@@ -44,11 +33,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, h } from "vue";
 import { useMessage } from "naive-ui";
 import type { DataTableColumn } from "naive-ui";
-import { searchOperators } from "@/api/operators";
-import { getCachedOperators, syncOperators } from "@/api/cache";
+import { getCachedOperators, syncOperators, updateOperatorRemarks } from "@/api/cache";
 
 const message = useMessage();
 const loading = ref(true);
@@ -56,13 +44,24 @@ const syncing = ref(false);
 const operators = ref<any[]>([]);
 const filtered = ref<any[]>([]);
 const searchText = ref("");
-const useCache = ref(false);
 
 const columns: DataTableColumn[] = [
-  { title: "名称", key: "name", width: 200 },
-  { title: "说明", key: "description", ellipsis: { tooltip: true } },
+  { title: "名称", key: "name", width: 160 },
+  { title: "描述", key: "definition", ellipsis: { tooltip: true }, width: 260 },
+  { title: "说明", key: "description", ellipsis: { tooltip: true }, minWidth: 200 },
   { title: "类型", key: "type", width: 100 },
-  { title: "分类", key: "category", width: 100 },
+  { title: "分类", key: "category", width: 110 },
+  { title: "备注", key: "remarks", width: 200,
+    render: (row: any) =>
+      h("div", { style: "display:flex;gap:4px;align-items:center" }, [
+        h("input", {
+          value: row.remarks ?? "",
+          style: "flex:1;border:none;border-bottom:1px solid #d9d9d9;outline:none;background:transparent;padding:2px 4px",
+          onInput: (e: any) => { row.remarks = e.target.value; },
+          onChange: () => handleRemarksChange(row),
+        }),
+      ]),
+  },
 ];
 
 function filterOperators() {
@@ -79,45 +78,16 @@ function filterOperators() {
   }
 }
 
-async function loadOnline() {
-  loading.value = true;
-  try {
-    const res = await searchOperators();
-    const data = res.data;
-    operators.value = data.results ?? data.operators ?? data;
-    filtered.value = operators.value;
-  } catch (err: any) {
-    message.error("加载算子失败");
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function loadCached() {
+async function loadData() {
   loading.value = true;
   try {
     const res = await getCachedOperators();
     operators.value = res.data.results ?? [];
     filtered.value = operators.value;
-    if (operators.value.length === 0) {
-      message.warning("本地暂无缓存数据，请先同步");
-      useCache.value = false;
-      await loadOnline();
-      return;
-    }
   } catch {
     message.error("读取缓存失败");
   } finally {
     loading.value = false;
-  }
-}
-
-async function toggleSource() {
-  useCache.value = !useCache.value;
-  if (useCache.value) {
-    await loadCached();
-  } else {
-    await loadOnline();
   }
 }
 
@@ -126,7 +96,7 @@ async function handleSync() {
   try {
     const res = await syncOperators();
     message.success(res.data.message);
-    if (useCache.value) await loadCached();
+    await loadData();
   } catch (err: any) {
     message.error(err?.response?.data?.detail || "同步失败");
   } finally {
@@ -134,5 +104,13 @@ async function handleSync() {
   }
 }
 
-onMounted(loadOnline);
+async function handleRemarksChange(row: any) {
+  try {
+    await updateOperatorRemarks(row.name, row.remarks ?? "");
+  } catch {
+    message.error("备注更新失败");
+  }
+}
+
+onMounted(loadData);
 </script>
