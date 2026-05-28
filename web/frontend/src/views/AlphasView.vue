@@ -2,6 +2,13 @@
   <div>
     <n-h2>Alpha 列表</n-h2>
 
+    <n-tabs v-model:value="tabValue" type="line" animated style="margin-bottom: 4px">
+      <n-tab-pane name="all" tab="全部" />
+      <n-tab-pane name="qualified" tab="达标" />
+      <n-tab-pane name="unqualified" tab="未达标" />
+      <n-tab-pane name="submitted" tab="已提交" />
+    </n-tabs>
+
     <n-card style="margin-bottom: 16px">
       <n-grid :cols="24" x-gap="8" y-gap="8">
         <n-gi :span="6">
@@ -143,12 +150,13 @@
       :single-line="false"
       size="small"
       :pagination="pagination"
+      :scroll-x="2200"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { h, ref, reactive, computed, onMounted } from "vue";
+import { h, ref, reactive, computed, watch, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useMessage } from "naive-ui";
 import type { DataTableColumn } from "naive-ui";
@@ -161,6 +169,7 @@ const message = useMessage();
 const loading = ref(true);
 const syncing = ref(false);
 const alphas = ref<any[]>([]);
+const tabValue = ref("qualified");
 
 const filters = reactive({
   keyword: "",
@@ -322,6 +331,12 @@ const columns: DataTableColumn[] = [
     render: (row: any) => row.dateCreated ? new Date(row.dateCreated).toLocaleString("zh-CN") : "—",
   },
   {
+    title: "提交时间",
+    key: "dateSubmitted",
+    width: 160,
+    render: (row: any) => row.dateSubmitted ? new Date(row.dateSubmitted).toLocaleString("zh-CN") : "—",
+  },
+  {
     title: "操作",
     key: "actions",
     width: 70,
@@ -408,6 +423,16 @@ async function handleSearch() {
     if (filters.color) {
       items = items.filter((a: any) => a.color === filters.color);
     }
+
+    // Tab 筛选
+    if (tabValue.value === "qualified") {
+      items = items.filter((a: any) => a.grade && a.grade !== "INFERIOR" && a.color !== "RED");
+    } else if (tabValue.value === "unqualified") {
+      items = items.filter((a: any) => a.grade === "INFERIOR" || a.color === "RED");
+    } else if (tabValue.value === "submitted") {
+      items = items.filter((a: any) => a.status === "ACTIVE");
+    }
+
     alphas.value = items;
   } catch (err: any) {
     message.error(err?.response?.data?.detail || "查询失败");
@@ -428,6 +453,11 @@ async function handleSync() {
     syncing.value = false;
   }
 }
+
+watch(tabValue, () => {
+  pagination.page = 1;
+  handleSearch();
+});
 
 onMounted(handleSearch);
 </script>
