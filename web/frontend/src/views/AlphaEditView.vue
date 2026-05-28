@@ -17,7 +17,12 @@
           <n-dynamic-tags v-model:value="form.tags" />
         </n-form-item>
         <n-form-item label="颜色">
-          <n-color-picker v-model:value="form.color" />
+          <div style="display: flex; align-items: center; gap: 8px; width: 100%">
+            <n-color-picker v-model:value="form.color" style="flex: 1" />
+            <n-button v-if="form.color" size="small" @click="form.color = null">
+              清除
+            </n-button>
+          </div>
         </n-form-item>
         <n-form-item label="收藏">
           <n-switch v-model:value="form.favorite" />

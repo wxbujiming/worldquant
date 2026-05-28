@@ -75,9 +75,9 @@ const syncing = ref(false);
 const datasets = ref<any[]>([]);
 
 const filters = reactive({
-  region: "usa",
-  delay: 1,
-  universe: "top3000",
+  region: null,
+  delay: null,
+  universe: null,
 });
 
 const regionOptions = [

@@ -31,18 +31,35 @@
         </n-card>
       </n-gi>
     </n-grid>
+
+    <n-grid :cols="2" x-gap="16" y-gap="16" style="margin-top: 16px">
+      <n-gi>
+        <n-card title="Alpha Color 分布">
+          <div ref="chartRef" style="height: 340px"></div>
+          <n-empty v-if="noAlphaData" description="暂无 Alpha 数据" style="padding: 60px 0" />
+        </n-card>
+      </n-gi>
+      <n-gi>
+        <n-card title="Alpha 阻塞原因">
+          <div ref="blockingChartRef" style="height: 340px"></div>
+          <n-empty v-if="noAlphaData" description="暂无 Alpha 数据" style="padding: 60px 0" />
+        </n-card>
+      </n-gi>
+    </n-grid>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from "vue";
+import { ref, reactive, onMounted, onUnmounted, nextTick } from "vue";
 import { useMessage } from "naive-ui";
+import * as echarts from "echarts";
 import {
   getCacheStats,
   syncOperators,
   syncDatasets,
   syncFields,
   syncAlphas,
+  getCachedAlphas,
 } from "@/api/cache";
 
 const message = useMessage();
@@ -62,6 +79,12 @@ const syncing = reactive({
   fields: false,
   alphas: false,
 });
+
+const chartRef = ref<HTMLDivElement | null>(null);
+const blockingChartRef = ref<HTMLDivElement | null>(null);
+const noAlphaData = ref(false);
+let chartInstance: echarts.ECharts | null = null;
+let blockingChartInstance: echarts.ECharts | null = null;
 
 const cardItems = [
   { key: "operators", label: "算子" },
@@ -90,6 +113,7 @@ async function handleSync(key: string) {
     const res = await action();
     message.success(res.data.message);
     await refreshStats();
+    if (key === "alphas") await loadColorChart(); // 刷新两个图表
   } catch (err: any) {
     message.error(err?.response?.data?.detail || "同步失败，请先登录");
   } finally {
@@ -109,5 +133,218 @@ async function refreshStats() {
   }
 }
 
-onMounted(refreshStats);
+const colorNameMap: Record<string, string> = {
+  red: "红",
+  green: "绿",
+  blue: "蓝",
+  yellow: "黄",
+  orange: "橙",
+  purple: "紫",
+  cyan: "青",
+  pink: "粉",
+  brown: "棕",
+  grey: "灰",
+  gray: "灰",
+  white: "白",
+  black: "黑",
+};
+
+const colorColors: Record<string, string> = {
+  red: "#ef4444",
+  green: "#22c55e",
+  blue: "#3b82f6",
+  yellow: "#eab308",
+  orange: "#f97316",
+  purple: "#a855f7",
+  cyan: "#06b6d4",
+  pink: "#ec4899",
+  brown: "#78716c",
+  grey: "#6b7280",
+  gray: "#6b7280",
+};
+
+function renderColorChart(alphaList: any[]) {
+  noAlphaData.value = !alphaList || alphaList.length === 0;
+  if (noAlphaData.value) return;
+
+  const counts: Record<string, number> = {};
+  for (const alpha of alphaList) {
+    const c = (alpha.color || "unknown").toLowerCase();
+    counts[c] = (counts[c] || 0) + 1;
+  }
+
+  const entries = Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 4);
+
+  const data = entries.map(([color, count]) => ({
+    name: colorNameMap[color] || color,
+    value: count,
+    itemStyle: { color: colorColors[color] || "#6b7280" },
+  }));
+
+  if (data.length === 0) {
+    noAlphaData.value = true;
+    return;
+  }
+
+  nextTick(() => {
+    if (!chartRef.value) return;
+    if (!chartInstance) {
+      chartInstance = echarts.init(chartRef.value);
+    }
+    chartInstance.setOption({
+      tooltip: { trigger: "item", formatter: "{b}: {c}" },
+      legend: {
+        bottom: 0,
+        type: "scroll",
+        selector: [
+          { type: "all", title: "全选" },
+          { type: "inverse", title: "反选" },
+        ],
+      },
+      series: [
+        {
+          type: "pie",
+          radius: ["0%", "55%"],
+          minAngle: 3,
+          center: ["50%", "40%"],
+          padAngle: 3,
+          itemStyle: { borderRadius: 4 },
+          label: {
+            show: true,
+            fontSize: 15,
+            fontWeight: "bold",
+            formatter: "{b}: {c}",
+            lineHeight: 30,
+          },
+          labelLine: {
+            length: 25,
+            length2: 40,
+            smooth: true,
+          },
+          emphasis: {
+            label: { show: true, fontSize: 18, fontWeight: "bold" },
+          },
+          data,
+        },
+      ],
+    });
+  });
+}
+
+async function loadColorChart() {
+  try {
+    const res = await getCachedAlphas();
+    const list = res.data.results ?? [];
+    renderColorChart(list);
+    renderBlockingChart(list);
+  } catch {
+    noAlphaData.value = true;
+  }
+}
+
+const blockingLabels = ["Sharpe 不足", "Fitness 不足", "Turnover 不合适", "Self Corr 过高", "Checks 失败"];
+const blockingColors = ["#ef4444", "#f97316", "#eab308", "#a855f7", "#6b7280"];
+
+function renderBlockingChart(alphaList: any[]) {
+  if (!alphaList || alphaList.length === 0) return;
+
+  const counts: Record<string, number> = {
+    sharpe: 0, fitness: 0, turnover: 0, self_corr: 0, checks: 0,
+  };
+
+  for (const alpha of alphaList) {
+    let isData: any = null;
+    if (typeof alpha.is_data === "string") {
+      try { isData = JSON.parse(alpha.is_data); } catch {}
+    } else if (typeof alpha.is === "object") {
+      isData = alpha.is;
+    }
+    if (!isData) continue;
+
+    const checks: any[] = isData.checks || [];
+    const failedMap: Record<string, boolean> = {};
+    for (const c of checks) {
+      if (c.result === "FAIL") failedMap[c.name] = true;
+    }
+
+    const turnover = isData.turnover;
+    const fitness = isData.fitness;
+    const sharpe = isData.sharpe;
+
+    // Self Corr 过高
+    if (failedMap["SELF_CORRELATION"]) counts.self_corr++;
+
+    // Turnover 不合适: 不在 [0.01, 0.70] 范围
+    if (turnover != null && (turnover < 0.01 || turnover > 0.70)) counts.turnover++;
+
+    // Fitness 不足: < 1.0
+    if (fitness != null && fitness < 1.0) counts.fitness++;
+
+    // Sharpe 不足: < 1.25
+    if (sharpe != null && sharpe < 1.25) counts.sharpe++;
+
+    // Checks 失败: LOW_SHARPE、LOW_FITNESS、LOW_SUB_UNIVERSE_SHARPE 都 FAIL
+    if (failedMap["LOW_SHARPE"] && failedMap["LOW_FITNESS"] && failedMap["LOW_SUB_UNIVERSE_SHARPE"]) counts.checks++;
+  }
+
+  const keys = Object.keys(counts);
+  const labels = keys.map((k) => blockingLabels[keys.indexOf(k)] || k);
+  const values = keys.map((k) => counts[k]);
+  const colors = keys.map((k) => blockingColors[keys.indexOf(k)] || "#6b7280");
+
+  nextTick(() => {
+    if (!blockingChartRef.value) return;
+    if (!blockingChartInstance) {
+      blockingChartInstance = echarts.init(blockingChartRef.value);
+    }
+    blockingChartInstance.setOption({
+      tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, formatter: "{b}: {c}" },
+      grid: { left: 110, right: 40, top: 10, bottom: 20 },
+      xAxis: { type: "value", minInterval: 1 },
+      yAxis: {
+        type: "category",
+        data: labels,
+        axisLabel: { fontSize: 13, fontWeight: "bold" },
+      },
+      series: [
+        {
+          type: "bar",
+          data: values.map((v, i) => ({
+            value: v,
+            itemStyle: { color: colors[i], borderRadius: [0, 4, 4, 0] },
+          })),
+          barMaxWidth: 36,
+          label: {
+            show: true,
+            position: "right",
+            fontSize: 14,
+            fontWeight: "bold",
+          },
+        },
+      ],
+    });
+  });
+}
+
+onMounted(() => {
+  refreshStats();
+  loadColorChart();
+  window.addEventListener("resize", handleResize);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("resize", handleResize);
+  chartInstance?.dispose();
+  chartInstance = null;
+  blockingChartInstance?.dispose();
+  blockingChartInstance = null;
+});
+
+function handleResize() {
+  chartInstance?.resize();
+  blockingChartInstance?.resize();
+}
 </script>

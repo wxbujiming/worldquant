@@ -6,6 +6,7 @@ import threading
 
 DB_DIR = os.path.join(os.path.dirname(__file__), "..", "cache")
 DB_PATH = os.path.join(DB_DIR, "wqb_cache.db")
+BACKUP_PATH = DB_PATH + ".bak"
 _local = threading.local()
 
 
@@ -16,11 +17,30 @@ def _get_conn() -> sqlite3.Connection:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute("PRAGMA foreign_keys=ON")
         _local.conn = conn
     return _local.conn
 
 
+def _flatten(item: dict) -> dict:
+    """将 JSON 第一层字段展平，嵌套 dict/list 转 JSON 字符串。"""
+    out = {}
+    for k, v in item.items():
+        if isinstance(v, (dict, list)):
+            out[k] = json.dumps(v)
+        else:
+            out[k] = v
+    return out
+
+
 def init_db():
+    # 备份旧库
+    if os.path.isfile(DB_PATH) and not os.path.isfile(BACKUP_PATH):
+        try:
+            os.rename(DB_PATH, BACKUP_PATH)
+        except OSError:
+            pass
+
     conn = _get_conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS sync_meta (
@@ -29,8 +49,8 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS operators (
-            id TEXT PRIMARY KEY,
-            name TEXT,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
             description TEXT,
             type TEXT,
             category TEXT,
@@ -39,7 +59,8 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS datasets (
-            id TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wb_id TEXT,
             name TEXT,
             region TEXT,
             delay INTEGER,
@@ -47,32 +68,39 @@ def init_db():
             category TEXT,
             coverage REAL,
             value_score REAL,
-            theme INTEGER,
+            themes TEXT,
             type TEXT,
             raw_data TEXT
         );
 
         CREATE TABLE IF NOT EXISTS fields (
-            id TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wb_id TEXT,
             name TEXT,
-            dataset_id TEXT,
             type TEXT,
             category TEXT,
             coverage REAL,
+            dataset TEXT,
+            dataset_id TEXT,
             raw_data TEXT
         );
 
         CREATE TABLE IF NOT EXISTS alphas (
-            id TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wb_id TEXT,
+            name TEXT,
+            grade TEXT,
+            color TEXT,
+            status TEXT,
+            date_created TEXT,
+            stage TEXT,
+            tags TEXT,
+            regular TEXT,
+            settings TEXT,
+            is_data TEXT,
             raw_data TEXT
         );
     """)
-    # 兼容旧表：添加缺失的列
-    for col in ("remarks",):
-        try:
-            conn.execute(f"ALTER TABLE operators ADD COLUMN {col} TEXT DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass
     conn.commit()
 
 
@@ -111,24 +139,31 @@ def sync_operators(session) -> int:
         op_name = item.get("name", "")
         if not op_name:
             continue
-        exists = conn.execute(
-            "SELECT 1 FROM operators WHERE id = ?", (op_name,)
+        flat = _flatten(item)
+        raw = json.dumps(item)
+
+        existing = conn.execute(
+            "SELECT name, description, type, category FROM operators WHERE name = ?", (op_name,)
         ).fetchone()
-        if exists:
+        if existing:
+            if (existing["name"] != flat.get("name")
+                    or existing["description"] != flat.get("description")
+                    or existing["type"] != flat.get("type")
+                    or existing["category"] != flat.get("category")):
+                conn.execute(
+                    """UPDATE operators SET name=?, description=?, type=?, category=?, raw_data=?
+                       WHERE name=?""",
+                    (flat.get("name"), flat.get("description"), flat.get("type"),
+                     flat.get("category"), raw, op_name),
+                )
+                count += 1
             continue
+
         conn.execute(
-            """INSERT INTO operators
-               (id, name, description, type, category, remarks, raw_data)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                op_name,
-                op_name,
-                item.get("description", ""),
-                item.get("type", ""),
-                item.get("category", ""),
-                "",
-                json.dumps(item),
-            ),
+            """INSERT INTO operators (name, description, type, category, remarks, raw_data)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (flat.get("name"), flat.get("description"), flat.get("type"),
+             flat.get("category"), "", raw),
         )
         count += 1
     set_synced_at("operators")
@@ -145,14 +180,14 @@ def get_cached_operators() -> list[dict]:
 
 def update_operator_remarks(op_id: str, remarks: str):
     _get_conn().execute(
-        "UPDATE operators SET remarks = ? WHERE id = ?", (remarks, op_id)
+        "UPDATE operators SET remarks = ? WHERE name = ?", (remarks, op_id)
     )
     _get_conn().commit()
 
 
 def get_operator_remarks(op_id: str) -> str:
     row = _get_conn().execute(
-        "SELECT remarks FROM operators WHERE id = ?", (op_id,)
+        "SELECT remarks FROM operators WHERE name = ?", (op_id,)
     ).fetchone()
     return row["remarks"] if row else ""
 
@@ -160,7 +195,6 @@ def get_operator_remarks(op_id: str) -> str:
 # ── Datasets ───────────────────────────────────────────────
 
 def sync_datasets(session) -> int:
-    """同步所有数据集，不再按 region/delay/universe 过滤（API 已变更）。"""
     conn = _get_conn()
     total = 0
     offset = 0
@@ -180,52 +214,40 @@ def sync_datasets(session) -> int:
             region = (item.get("region") or "").lower()
             delay = item.get("delay", 0)
             universe = (item.get("universe") or "").lower()
-            cat = item.get("category")
-            category = cat.get("id") if isinstance(cat, dict) else (cat or "")
-            ds_type = item.get("type")
-            ds_type_str = ds_type.get("id") if isinstance(ds_type, dict) else (ds_type or "")
             composite_id = f"{ds_id}__{region}__{delay}__{universe}"
-            new_name = item.get("name", "")
-            new_coverage = item.get("coverage")
-            new_value_score = item.get("valueScore")
-            new_theme = 1 if item.get("themes") else 0
-            new_raw = json.dumps(item)
+            raw = json.dumps(item)
+            flat = _flatten(item)
 
             existing = conn.execute(
-                """SELECT name, coverage, value_score, theme, category, type
-                   FROM datasets WHERE id = ?""",
+                "SELECT wb_id, name, region, delay, universe FROM datasets WHERE wb_id = ?",
                 (composite_id,),
             ).fetchone()
             if existing:
-                if (existing["name"] != new_name or existing["coverage"] != new_coverage
-                        or existing["value_score"] != new_value_score
-                        or existing["theme"] != new_theme or existing["category"] != category
-                        or existing["type"] != ds_type_str):
+                if (existing["name"] != flat.get("name")
+                        or existing["region"] != flat.get("region")
+                        or existing["delay"] != flat.get("delay")
+                        or existing["universe"] != flat.get("universe")):
                     conn.execute(
-                        """UPDATE datasets SET name=?, category=?, coverage=?, value_score=?, theme=?, type=?, raw_data=?
-                           WHERE id=?""",
-                        (new_name, category, new_coverage, new_value_score, new_theme, ds_type_str, new_raw, composite_id),
+                        """UPDATE datasets SET name=?, region=?, delay=?, universe=?, category=?,
+                           coverage=?, value_score=?, themes=?, type=?, raw_data=?
+                           WHERE wb_id=?""",
+                        (flat.get("name"), flat.get("region"), flat.get("delay"),
+                         flat.get("universe"), flat.get("category"),
+                         flat.get("coverage"), flat.get("valueScore"),
+                         flat.get("themes"), flat.get("type"), raw, composite_id),
                     )
                     total += 1
                 continue
+
             conn.execute(
                 """INSERT INTO datasets
-                   (id, name, region, delay, universe, category,
-                    coverage, value_score, theme, type, raw_data)
+                   (wb_id, name, region, delay, universe, category,
+                    coverage, value_score, themes, type, raw_data)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    composite_id,
-                    new_name,
-                    region,
-                    delay,
-                    universe,
-                    category,
-                    new_coverage,
-                    new_value_score,
-                    new_theme,
-                    ds_type_str,
-                    new_raw,
-                ),
+                (composite_id, flat.get("name"), flat.get("region"), flat.get("delay"),
+                 flat.get("universe"), flat.get("category"),
+                 flat.get("coverage"), flat.get("valueScore"),
+                 flat.get("themes"), flat.get("type"), raw),
             )
             total += 1
         if len(items) < limit:
@@ -261,12 +283,6 @@ def get_cached_datasets(region: str | None = None,
 # ── Fields ─────────────────────────────────────────────────
 
 def sync_fields(session, dataset_id: str | None = None) -> int:
-    """同步字段。
-
-    遍历缓存数据集列表，每个条目自带 region/delay/universe。
-    指定 dataset_id 时只同步该数据集的所有组合。
-    dataset_id 为 None 时只同步当前字段数为 0 的数据集。
-    """
     import time
     from .wqb_service import logger
     conn = _get_conn()
@@ -289,10 +305,9 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
         if not region or delay is None or not universe:
             continue
 
-        # 全量同步时跳过已有字段的数据集（节省时间 + 避免限流）
         if not dataset_id:
             existing = conn.execute(
-                "SELECT COUNT(*) FROM fields WHERE dataset_id = ?", (d_id,)
+                "SELECT COUNT(*) FROM fields WHERE wb_id LIKE ?", (f"{d_id}%",)
             ).fetchone()[0]
             if existing > 0:
                 continue
@@ -305,7 +320,6 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
                 region=region, delay=delay, universe=universe,
                 dataset_id=d_id, limit=limit, offset=offset,
             )
-            # 检测 API 错误（限流、session 过期等），避免静默失败
             if not resp.ok:
                 logger.warning(f"fields API error: {resp.status_code} {resp.text[:200]} for {combo_key}")
                 break
@@ -320,45 +334,35 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
                 f_id = str(item.get("id", ""))
                 if not f_id:
                     continue
-                cat = item.get("category")
-                category_str = json.dumps(cat) if isinstance(cat, dict) else (cat or "")
-                new_name = item.get("name", "")
-                new_type = item.get("type", "")
-                new_coverage = item.get("coverage")
-                new_ds_id = item.get("dataset", {}).get("id", "") if isinstance(item.get("dataset"), dict) else ""
+                raw = json.dumps(item)
+                flat = _flatten(item)
+
+                ds_id = ""
+                ds_val = item.get("dataset")
+                if isinstance(ds_val, dict):
+                    ds_id = ds_val.get("id", "")
 
                 existing = conn.execute(
-                    "SELECT name, type, category, coverage, raw_data FROM fields WHERE id = ?", (f_id,)
+                    "SELECT name, type, category, coverage FROM fields WHERE wb_id = ?", (f_id,)
                 ).fetchone()
                 if existing:
-                    # 对比关键字段，有变更则更新
-                    old_name = existing["name"]
-                    old_type = existing["type"]
-                    old_cat = existing["category"]
-                    old_coverage = existing["coverage"]
-                    if (old_name != new_name or old_type != new_type
-                            or old_cat != category_str
-                            or old_coverage != new_coverage):
+                    if (existing["name"] != flat.get("name")
+                            or existing["type"] != flat.get("type")
+                            or existing["category"] != flat.get("category")
+                            or existing["coverage"] != flat.get("coverage")):
                         conn.execute(
-                            """UPDATE fields SET name=?, dataset_id=?, type=?, category=?, coverage=?, raw_data=?
-                               WHERE id=?""",
-                            (new_name, new_ds_id, new_type, category_str, new_coverage, json.dumps(item), f_id),
+                            """UPDATE fields SET name=?, type=?, category=?, coverage=?, dataset=?, dataset_id=?, raw_data=?
+                               WHERE wb_id=?""",
+                            (flat.get("name"), flat.get("type"), flat.get("category"),
+                             flat.get("coverage"), flat.get("dataset"), ds_id, raw, f_id),
                         )
                         total += 1
                     continue
                 conn.execute(
-                    """INSERT INTO fields
-                       (id, name, dataset_id, type, category, coverage, raw_data)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        f_id,
-                        new_name,
-                        new_ds_id,
-                        new_type,
-                        category_str,
-                        new_coverage,
-                        json.dumps(item),
-                    ),
+                    """INSERT INTO fields (wb_id, name, type, category, coverage, dataset, dataset_id, raw_data)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (f_id, flat.get("name"), flat.get("type"), flat.get("category"),
+                     flat.get("coverage"), flat.get("dataset"), ds_id, raw),
                 )
                 total += 1
             if len(items) < limit:
@@ -385,6 +389,7 @@ def get_cached_fields(dataset_id: str | None = None) -> list[dict]:
 # ── Alphas ───────────────────────────────────────────────
 
 def sync_alphas(session) -> int:
+    import time
     conn = _get_conn()
     count = 0
     offset = 0
@@ -399,19 +404,46 @@ def sync_alphas(session) -> int:
             a_id = str(item.get("id", ""))
             if not a_id:
                 continue
-            exists = conn.execute(
-                "SELECT 1 FROM alphas WHERE id = ?", (a_id,)
+            raw = json.dumps(item)
+            flat = _flatten(item)
+
+            existing = conn.execute(
+                "SELECT name, grade, color, status, stage FROM alphas WHERE wb_id = ?", (a_id,)
             ).fetchone()
-            if exists:
+            if existing:
+                if (existing["name"] != flat.get("name")
+                        or existing["grade"] != flat.get("grade")
+                        or existing["color"] != flat.get("color")
+                        or existing["status"] != flat.get("status")
+                        or existing["stage"] != flat.get("stage")):
+                    conn.execute(
+                        """UPDATE alphas SET name=?, grade=?, color=?, status=?, date_created=?,
+                           stage=?, tags=?, regular=?, settings=?, is_data=?, raw_data=?
+                           WHERE wb_id=?""",
+                        (flat.get("name"), flat.get("grade"), flat.get("color"),
+                         flat.get("status"), flat.get("dateCreated"), flat.get("stage"),
+                         flat.get("tags"), flat.get("regular"), flat.get("settings"),
+                         flat.get("is"), raw, a_id),
+                    )
+                    count += 1
                 continue
+
             conn.execute(
-                "INSERT INTO alphas (id, raw_data) VALUES (?, ?)",
-                (a_id, json.dumps(item)),
+                """INSERT INTO alphas
+                   (wb_id, name, grade, color, status, date_created, stage, tags,
+                    regular, settings, is_data, raw_data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (a_id, flat.get("name"), flat.get("grade"), flat.get("color"),
+                 flat.get("status"), flat.get("dateCreated"), flat.get("stage"),
+                 flat.get("tags"), flat.get("regular"), flat.get("settings"),
+                 flat.get("is"), raw),
             )
             count += 1
+        conn.commit()
         if len(items) < limit:
             break
         offset += limit
+        time.sleep(1.1)
     set_synced_at("alphas")
     conn.commit()
     return count
@@ -419,7 +451,7 @@ def sync_alphas(session) -> int:
 
 def get_cached_alphas() -> list[dict]:
     rows = _get_conn().execute(
-        "SELECT raw_data FROM alphas ORDER BY id"
+        "SELECT raw_data FROM alphas ORDER BY wb_id"
     ).fetchall()
     return [json.loads(r["raw_data"]) for r in rows]
 
