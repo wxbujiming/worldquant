@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, Query
 from wqb import FilterRange
 from ..dependencies import require_session
+from ..log_config import get_logger
 
+logger = get_logger("datasets")
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
 
@@ -26,6 +28,8 @@ def search_datasets(
         if coverage_min is not None or coverage_max is not None
         else None
     )
+    logger.info(f"搜索数据集: region={region} delay={delay} universe={universe} "
+                f"search={search} category={category} limit={limit} offset={offset}")
     resp = session.search_datasets_limited(
         region=region,
         delay=delay,
@@ -39,10 +43,14 @@ def search_datasets(
         limit=limit,
         offset=offset,
     )
-    return resp.json()
+    data = resp.json()
+    results = data.get("results", [])
+    logger.info(f"数据集搜索完成: 返回 {len(results)} 条")
+    return data
 
 
 @router.get("/{dataset_id}")
 def get_dataset(dataset_id: str, session=Depends(require_session)):
+    logger.info(f"获取数据集详情: dataset_id={dataset_id}")
     resp = session.locate_dataset(dataset_id)
     return resp.json()

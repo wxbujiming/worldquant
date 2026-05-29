@@ -3,7 +3,9 @@ import sqlite3
 import datetime
 import os
 import threading
+from ..log_config import get_logger
 
+logger = get_logger("cache_service")
 DB_DIR = os.path.join(os.path.dirname(__file__), "..", "cache")
 DB_PATH = os.path.join(DB_DIR, "wqb_cache.db")
 BACKUP_PATH = DB_PATH + ".bak"
@@ -60,7 +62,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS datasets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            wb_id TEXT,
+            wb_id TEXT UNIQUE,
             name TEXT,
             region TEXT,
             delay INTEGER,
@@ -70,6 +72,13 @@ def init_db():
             value_score REAL,
             themes TEXT,
             type TEXT,
+            description TEXT            COMMENT '描述',
+            subcategory TEXT            COMMENT '子分类（JSON）',
+            date_coverage REAL          COMMENT '数据覆盖日期范围',
+            user_count INTEGER          COMMENT '用户数',
+            alpha_count INTEGER         COMMENT 'Alpha 数',
+            field_count INTEGER         COMMENT '字段数',
+            research_papers TEXT        COMMENT '研究论文（JSON）',
             raw_data TEXT
         );
 
@@ -92,15 +101,50 @@ def init_db():
             grade TEXT,
             color TEXT,
             status TEXT,
-            date_created TEXT,
+            date_created TEXT       COMMENT '创建时间',
             stage TEXT,
             tags TEXT,
             regular TEXT,
             settings TEXT,
             is_data TEXT,
+            type TEXT                COMMENT '类型（如 REGULAR）',
+            author TEXT              COMMENT '作者/用户',
+            date_submitted TEXT      COMMENT '提交时间',
+            train TEXT               COMMENT '训练集数据（JSON）',
+            test TEXT                COMMENT '测试集数据（JSON）',
             raw_data TEXT
         );
     """)
+    conn.commit()
+    _migrate_datasets_schema(conn)
+    logger.info(f"数据库初始化完成: {DB_PATH}")
+
+
+def _migrate_datasets_schema(conn):
+    """为 datasets 表补充新增列，并从 raw_data 回填已有数据。"""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(datasets)").fetchall()}
+    additions = []
+    for col, col_type in [("description", "TEXT"), ("subcategory", "TEXT"),
+                          ("date_coverage", "REAL"), ("user_count", "INTEGER"),
+                          ("alpha_count", "INTEGER"), ("field_count", "INTEGER"),
+                          ("research_papers", "TEXT")]:
+        if col not in existing:
+            additions.append(f"ALTER TABLE datasets ADD COLUMN {col} {col_type}")
+    for stmt in additions:
+        conn.execute(stmt)
+
+    # 回填新增字段
+    conn.execute(
+        """UPDATE datasets SET
+            description = json_extract(raw_data, '$.description'),
+            subcategory = json_extract(raw_data, '$.subcategory'),
+            date_coverage = json_extract(raw_data, '$.dateCoverage'),
+            user_count = json_extract(raw_data, '$.userCount'),
+            alpha_count = json_extract(raw_data, '$.alphaCount'),
+            field_count = json_extract(raw_data, '$.fieldCount'),
+            research_papers = json_extract(raw_data, '$.researchPapers')
+           WHERE description IS NULL"""
+    )
     conn.commit()
 
 
@@ -123,6 +167,7 @@ def set_synced_at(data_type: str):
 # ── Operators ──────────────────────────────────────────────
 
 def sync_operators(session) -> int:
+    logger.info("开始同步算子数据...")
     resp = session.search_operators()
     data = resp.json()
     if isinstance(data, list):
@@ -168,6 +213,7 @@ def sync_operators(session) -> int:
         count += 1
     set_synced_at("operators")
     conn.commit()
+    logger.info(f"算子同步完成: 新增/更新 {count} 条, 总数 {len(items)}")
     return count
 
 
@@ -195,7 +241,9 @@ def get_operator_remarks(op_id: str) -> str:
 # ── Datasets ───────────────────────────────────────────────
 
 def sync_datasets(session) -> int:
+    logger.info("开始同步数据集数据...")
     conn = _get_conn()
+    _migrate_datasets_schema(conn)
     total = 0
     offset = 0
     limit = 50
@@ -219,35 +267,43 @@ def sync_datasets(session) -> int:
             flat = _flatten(item)
 
             existing = conn.execute(
-                "SELECT wb_id, name, region, delay, universe FROM datasets WHERE wb_id = ?",
+                "SELECT 1 FROM datasets WHERE wb_id = ?",
                 (composite_id,),
             ).fetchone()
             if existing:
-                if (existing["name"] != flat.get("name")
-                        or existing["region"] != flat.get("region")
-                        or existing["delay"] != flat.get("delay")
-                        or existing["universe"] != flat.get("universe")):
-                    conn.execute(
-                        """UPDATE datasets SET name=?, region=?, delay=?, universe=?, category=?,
-                           coverage=?, value_score=?, themes=?, type=?, raw_data=?
-                           WHERE wb_id=?""",
-                        (flat.get("name"), flat.get("region"), flat.get("delay"),
-                         flat.get("universe"), flat.get("category"),
-                         flat.get("coverage"), flat.get("valueScore"),
-                         flat.get("themes"), flat.get("type"), raw, composite_id),
-                    )
-                    total += 1
+                conn.execute(
+                    """UPDATE datasets SET name=?, region=?, delay=?, universe=?, category=?,
+                       coverage=?, value_score=?, themes=?, type=?,
+                       description=?, subcategory=?, date_coverage=?,
+                       user_count=?, alpha_count=?, field_count=?, research_papers=?, raw_data=?
+                       WHERE wb_id=?""",
+                    (flat.get("name"), flat.get("region"), flat.get("delay"),
+                     flat.get("universe"), flat.get("category"),
+                     flat.get("coverage"), flat.get("valueScore"),
+                     flat.get("themes"), flat.get("type"),
+                     flat.get("description"), flat.get("subcategory"),
+                     flat.get("dateCoverage"), flat.get("userCount"),
+                     flat.get("alphaCount"), flat.get("fieldCount"),
+                     flat.get("researchPapers"), raw, composite_id),
+                )
+                total += 1
                 continue
 
             conn.execute(
                 """INSERT INTO datasets
                    (wb_id, name, region, delay, universe, category,
-                    coverage, value_score, themes, type, raw_data)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    coverage, value_score, themes, type,
+                    description, subcategory, date_coverage,
+                    user_count, alpha_count, field_count, research_papers, raw_data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (composite_id, flat.get("name"), flat.get("region"), flat.get("delay"),
                  flat.get("universe"), flat.get("category"),
                  flat.get("coverage"), flat.get("valueScore"),
-                 flat.get("themes"), flat.get("type"), raw),
+                 flat.get("themes"), flat.get("type"),
+                 flat.get("description"), flat.get("subcategory"),
+                 flat.get("dateCoverage"), flat.get("userCount"),
+                 flat.get("alphaCount"), flat.get("fieldCount"),
+                 flat.get("researchPapers"), raw),
             )
             total += 1
         if len(items) < limit:
@@ -255,6 +311,7 @@ def sync_datasets(session) -> int:
         offset += limit
     set_synced_at("datasets")
     conn.commit()
+    logger.info(f"数据集同步完成: 同步 {total} 条")
     return total
 
 
@@ -284,11 +341,11 @@ def get_cached_datasets(region: str | None = None,
 
 def sync_fields(session, dataset_id: str | None = None) -> int:
     import time
-    from .wqb_service import logger
     conn = _get_conn()
     total = 0
     datasets = get_cached_datasets()
     seen = set()
+    logger.info(f"开始同步字段数据... datasets_count={len(datasets)} dataset_id={dataset_id}")
     for ds in datasets:
         d_id = ds.get("id", "")
         if not d_id:
@@ -370,6 +427,7 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
             offset += limit
     set_synced_at("fields")
     conn.commit()
+    logger.info(f"字段同步完成: 同步 {total} 条")
     return total
 
 
@@ -394,12 +452,22 @@ def sync_alphas(session) -> int:
     count = 0
     offset = 0
     limit = 100
+    seen_ids: set[str] = set()
+    logger.info("开始同步 Alpha 数据...")
     while True:
         resp = session.filter_alphas_limited(limit=limit, offset=offset)
         data = resp.json()
         items = data.get("results") or data.get("alphas") or []
         if not items:
             break
+
+        # 检测是否循环到重复数据（API 越界后可能重复返回）
+        batch_ids = {str(item.get("id", "")) for item in items if item.get("id")}
+        if batch_ids and batch_ids.issubset(seen_ids):
+            logger.info(f"检测到重复数据，同步结束 (offset={offset})")
+            break
+        seen_ids.update(batch_ids)
+
         for item in items:
             a_id = str(item.get("id", ""))
             if not a_id:
@@ -408,35 +476,36 @@ def sync_alphas(session) -> int:
             flat = _flatten(item)
 
             existing = conn.execute(
-                "SELECT name, grade, color, status, stage FROM alphas WHERE wb_id = ?", (a_id,)
+                "SELECT 1 FROM alphas WHERE wb_id = ?",
+                (a_id,),
             ).fetchone()
             if existing:
-                if (existing["name"] != flat.get("name")
-                        or existing["grade"] != flat.get("grade")
-                        or existing["color"] != flat.get("color")
-                        or existing["status"] != flat.get("status")
-                        or existing["stage"] != flat.get("stage")):
-                    conn.execute(
-                        """UPDATE alphas SET name=?, grade=?, color=?, status=?, date_created=?,
-                           stage=?, tags=?, regular=?, settings=?, is_data=?, raw_data=?
-                           WHERE wb_id=?""",
-                        (flat.get("name"), flat.get("grade"), flat.get("color"),
-                         flat.get("status"), flat.get("dateCreated"), flat.get("stage"),
-                         flat.get("tags"), flat.get("regular"), flat.get("settings"),
-                         flat.get("is"), raw, a_id),
-                    )
-                    count += 1
+                conn.execute(
+                    """UPDATE alphas SET name=?, grade=?, color=?, status=?, date_created=?,
+                       stage=?, tags=?, regular=?, settings=?, is_data=?,
+                       type=?, author=?, date_submitted=?, train=?, test=?, raw_data=?
+                       WHERE wb_id=?""",
+                    (flat.get("name"), flat.get("grade"), flat.get("color"),
+                     flat.get("status"), flat.get("dateCreated"), flat.get("stage"),
+                     flat.get("tags"), flat.get("regular"), flat.get("settings"),
+                     flat.get("is"),
+                     flat.get("type"), flat.get("author"), flat.get("dateSubmitted"),
+                     flat.get("train"), flat.get("test"), raw, a_id),
+                )
+                count += 1
                 continue
 
             conn.execute(
                 """INSERT INTO alphas
                    (wb_id, name, grade, color, status, date_created, stage, tags,
-                    regular, settings, is_data, raw_data)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    regular, settings, is_data, type, author, date_submitted, train, test, raw_data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (a_id, flat.get("name"), flat.get("grade"), flat.get("color"),
                  flat.get("status"), flat.get("dateCreated"), flat.get("stage"),
                  flat.get("tags"), flat.get("regular"), flat.get("settings"),
-                 flat.get("is"), raw),
+                 flat.get("is"),
+                 flat.get("type"), flat.get("author"), flat.get("dateSubmitted"),
+                 flat.get("train"), flat.get("test"), raw),
             )
             count += 1
         conn.commit()
@@ -446,6 +515,7 @@ def sync_alphas(session) -> int:
         time.sleep(1.1)
     set_synced_at("alphas")
     conn.commit()
+    logger.info(f"Alpha 同步完成: 同步 {count} 条")
     return count
 
 
@@ -460,13 +530,17 @@ def get_cached_alphas() -> list[dict]:
 
 def get_stats() -> dict:
     conn = _get_conn()
+    op_count = conn.execute("SELECT COUNT(*) FROM operators").fetchone()[0]
+    ds_count = conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0]
+    f_count = conn.execute("SELECT COUNT(*) FROM fields").fetchone()[0]
+    a_count = conn.execute("SELECT COUNT(*) FROM alphas").fetchone()[0]
+    sync_rows = conn.execute("SELECT * FROM sync_meta").fetchall()
+    last_sync = {row["data_type"]: row["synced_at"] for row in sync_rows}
+    logger.info(f"查询缓存统计: operators={op_count} datasets={ds_count} fields={f_count} alphas={a_count} last_sync={last_sync}")
     return {
-        "operators": conn.execute("SELECT COUNT(*) FROM operators").fetchone()[0],
-        "datasets": conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0],
-        "fields": conn.execute("SELECT COUNT(*) FROM fields").fetchone()[0],
-        "alphas": conn.execute("SELECT COUNT(*) FROM alphas").fetchone()[0],
-        "last_sync": {
-            row["data_type"]: row["synced_at"]
-            for row in conn.execute("SELECT * FROM sync_meta").fetchall()
-        },
+        "operators": op_count,
+        "datasets": ds_count,
+        "fields": f_count,
+        "alphas": a_count,
+        "last_sync": last_sync,
     }

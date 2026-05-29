@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from wqb import FilterRange
 from ..dependencies import require_session
+from ..log_config import get_logger
 
+logger = get_logger("alphas")
 router = APIRouter(prefix="/api/alphas", tags=["alphas"])
 
 
@@ -61,6 +63,8 @@ def filter_alphas(
         if turnover_min is not None or turnover_max is not None
         else None
     )
+    logger.info(f"过滤 Alpha: name={name} status={status} region={region} delay={delay} "
+                f"universe={universe} limit={limit} offset={offset}")
     resp = session.filter_alphas_limited(
         name=name,
         status=status,
@@ -84,11 +88,14 @@ def filter_alphas(
         limit=limit,
         offset=offset,
     )
-    return resp.json()
+    data = resp.json()
+    logger.info(f"Alpha 过滤完成: 返回 {len(data.get('results', data.get('alphas', [])))} 条")
+    return data
 
 
 @router.get("/{alpha_id}")
 def get_alpha(alpha_id: str, session=Depends(require_session)):
+    logger.info(f"获取 Alpha 详情: alpha_id={alpha_id}")
     resp = session.locate_alpha(alpha_id)
     return resp.json()
 
@@ -110,45 +117,58 @@ def patch_alpha(
     session=Depends(require_session),
 ):
     kwargs = body.model_dump(exclude_none=True)
+    logger.info(f"更新 Alpha 属性: alpha_id={alpha_id} kwargs={kwargs}")
     resp = session.patch_properties(alpha_id, **kwargs)
     return resp.json()
 
 
 @router.post("/{alpha_id}/simulate")
 async def simulate_alpha(alpha_id: str, session=Depends(require_session)):
+    logger.info(f"开始模拟 Alpha: alpha_id={alpha_id}")
     try:
         alpha = session.locate_alpha(alpha_id).json()
         resp = await session.simulate(alpha, max_tries=range(600))
         if resp is None:
+            logger.warning(f"Alpha 模拟失败: alpha_id={alpha_id}")
             raise HTTPException(status_code=500, detail="Simulation failed")
+        logger.info(f"Alpha 模拟完成: alpha_id={alpha_id}")
         return resp.json()
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Alpha 模拟异常: alpha_id={alpha_id} error={e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{alpha_id}/check")
 async def check_alpha(alpha_id: str, session=Depends(require_session)):
+    logger.info(f"开始检查 Alpha: alpha_id={alpha_id}")
     try:
         resp = await session.check(alpha_id, max_tries=range(600))
         if resp is None:
+            logger.warning(f"Alpha 检查失败: alpha_id={alpha_id}")
             raise HTTPException(status_code=500, detail="Check failed")
+        logger.info(f"Alpha 检查完成: alpha_id={alpha_id}")
         return resp.json()
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Alpha 检查异常: alpha_id={alpha_id} error={e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{alpha_id}/submit")
 async def submit_alpha(alpha_id: str, session=Depends(require_session)):
+    logger.info(f"开始提交 Alpha: alpha_id={alpha_id}")
     try:
         resp = await session.submit(alpha_id, max_tries=range(600))
         if resp is None:
+            logger.warning(f"Alpha 提交失败: alpha_id={alpha_id}")
             raise HTTPException(status_code=500, detail="Submit failed")
+        logger.info(f"Alpha 提交完成: alpha_id={alpha_id}")
         return resp.json()
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Alpha 提交异常: alpha_id={alpha_id} error={e}")
         raise HTTPException(status_code=500, detail=str(e))
