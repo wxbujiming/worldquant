@@ -26,3 +26,11 @@ export function logout() {
 export function getStatus() {
   return client.get<AuthStatus>("/auth/status");
 }
+
+export function getUserProfile() {
+  return client.get("/auth/profile");
+}
+
+export function getSimulationQuota() {
+  return client.get("/auth/simulation-quota");
+}

@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from ..config import settings
+from ..dependencies import require_session
 from ..services.wqb_service import create_session, destroy_session, get_session
 from ..log_config import get_logger
 
@@ -69,4 +70,62 @@ def status():
     return {
         "authenticated": False,
         "has_credentials": bool(settings.wqb_email and settings.wqb_password),
+    }
+
+
+@router.get("/profile")
+def user_profile(session=Depends(require_session)):
+    logger.info("查询用户信息")
+    # 基本信息
+    user_resp = session.get("https://api.worldquantbrain.com/users/self")
+    user_data = user_resp.json()
+    # 竞赛/分数信息
+    comp_resp = session.get("https://api.worldquantbrain.com/competitions")
+    comp_data = comp_resp.json()
+    score = None
+    level = None
+    rank = None
+    alphas = None
+    if isinstance(comp_data, dict):
+        results = comp_data.get("results") or []
+        for c in results:
+            lb = c.get("leaderboard")
+            if lb and lb.get("score") is not None:
+                score = lb.get("score")
+                level = lb.get("level")
+                rank = lb.get("rank")
+                alphas = lb.get("alphas")
+                break
+    return {**user_data, "score": score, "level": level, "rank": rank, "submittedAlphas": alphas}
+
+
+@router.get("/simulation-quota")
+def simulation_quota(session=Depends(require_session)):
+    """查询剩余模拟测试次数（通过一次轻量模拟并立即取消来获取）"""
+    logger.info("查询模拟配额")
+    alpha = {
+        "type": "REGULAR",
+        "settings": {
+            "instrumentType": "EQUITY", "region": "USA",
+            "universe": "TOP3000", "delay": 1, "decay": 5,
+            "neutralization": "SUBINDUSTRY", "truncation": 0.08,
+            "pasteurization": "ON", "unitHandling": "VERIFY",
+            "nanHandling": "ON", "language": "FASTEXPR",
+            "visualization": False,
+        },
+        "regular": "rank(close)",
+    }
+    resp = session.post("https://api.worldquantbrain.com/simulations", json=alpha)
+    remaining = resp.headers.get("X-Ratelimit-Remaining")
+    limit = resp.headers.get("X-Ratelimit-Limit")
+    # 立即取消模拟，不浪费配额
+    location = resp.headers.get("Location")
+    if location and resp.status_code == 201:
+        try:
+            session.delete(location)
+        except Exception:
+            pass
+    return {
+        "remaining": int(remaining) if remaining else None,
+        "limit": int(limit) if limit else None,
     }

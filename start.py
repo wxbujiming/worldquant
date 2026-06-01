@@ -122,6 +122,7 @@ def start_dev():
         [PYTHON, "-m", "uvicorn", "backend.main:app",
          "--host", "0.0.0.0", "--port", str(BACKEND_PORT), "--reload"],
         cwd=BACKEND_DIR,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
     procs.append(backend)
     logger.info(f"后端已启动 http://localhost:{BACKEND_PORT} (PID={backend.pid}, 耗时 {_elapsed(t0)})")
@@ -133,6 +134,7 @@ def start_dev():
         ["npm", "run", "dev"],
         cwd=FRONTEND_DIR,
         shell=True,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
     procs.append(frontend)
     logger.info(f"前端已启动 http://localhost:{FRONTEND_PORT} (PID={frontend.pid}, 耗时 {_elapsed(t0)})")
@@ -144,9 +146,19 @@ def start_dev():
     except KeyboardInterrupt:
         logger.info("正在关闭服务...")
         for p in procs:
-            p.terminate()
-        for p in procs:
-            p.wait()
+            if p.poll() is None:
+                logger.info(f"正在停止 PID={p.pid}...")
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                        capture_output=True, timeout=5,
+                    )
+                    logger.info(f"PID={p.pid} 已停止")
+                except Exception:
+                    logger.warning(f"taskkill 失败，尝试 terminate PID={p.pid}")
+                    p.terminate()
+                    p.wait()
+                    logger.info(f"PID={p.pid} 已停止 (terminate)")
         logger.info("已停止")
 
 

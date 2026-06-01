@@ -30,6 +30,10 @@ export function getCachedDatasets(params?: {
   return client.get("/cache/datasets", { params });
 }
 
+export function getCachedDatasetKinds() {
+  return client.get("/cache/dataset-kinds");
+}
+
 export function getCachedFields(dataset_id?: string) {
   return client.get("/cache/fields", { params: { dataset_id } });
 }

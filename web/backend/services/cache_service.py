@@ -52,6 +52,36 @@ def init_db():
             raw_data TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS dataset_kinds (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            category TEXT,
+            subcategory TEXT,
+            type TEXT,
+            raw_data TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS dataset_variants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind_id TEXT NOT NULL REFERENCES dataset_kinds(id),
+            wb_id TEXT UNIQUE,
+            region TEXT NOT NULL,
+            delay INTEGER NOT NULL,
+            universe TEXT NOT NULL,
+            coverage REAL,
+            value_score REAL,
+            themes TEXT,
+            date_coverage REAL,
+            user_count INTEGER,
+            alpha_count INTEGER,
+            field_count INTEGER,
+            research_papers TEXT,
+            raw_data TEXT
+        );
+
+        -- 旧表保留用于迁移，后续可删除
         CREATE TABLE IF NOT EXISTS datasets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             wb_id TEXT UNIQUE,
@@ -110,6 +140,7 @@ def init_db():
     conn.commit()
     _migrate_datasets_schema(conn)
     _migrate_alphas_schema(conn)
+    _migrate_to_kind_variant(conn)
     logger.info(f"数据库初始化完成: {DB_PATH}")
 
 
@@ -148,6 +179,62 @@ def _migrate_alphas_schema(conn):
         conn.commit()
     except Exception as e:
         logger.warning(f"创建 alphas 索引失败: {e}")
+
+
+def _migrate_to_kind_variant(conn):
+    """将旧 datasets 表的数据迁移到 dataset_kinds + dataset_variants。"""
+    try:
+        # 检查旧表是否有数据且新表为空
+        old_count = conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0]
+        if old_count == 0:
+            return
+        new_count = conn.execute("SELECT COUNT(*) FROM dataset_kinds").fetchone()[0]
+        if new_count > 0:
+            return
+
+        logger.info(f"开始迁移 {old_count} 条数据集到新表结构...")
+
+        # 查出所有唯一 kind
+        rows = conn.execute("""
+            SELECT DISTINCT
+                substr(wb_id, 1, instr(wb_id, '__') - 1) as kind_id,
+                name, description, category, subcategory, type, raw_data
+            FROM datasets
+            WHERE wb_id LIKE '%__%'
+        """).fetchall()
+
+        for row in rows:
+            kind_id = row["kind_id"]
+            if not kind_id:
+                continue
+            # 取第一个变体的 raw_data 作为 kind 的 raw_data
+            conn.execute(
+                """INSERT OR IGNORE INTO dataset_kinds (id, name, description, category, subcategory, type, raw_data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (kind_id, row["name"], row["description"],
+                 row["category"], row["subcategory"], row["type"], row["raw_data"]),
+            )
+
+        # 迁移所有 variant 到 dataset_variants
+        conn.execute("""
+            INSERT OR IGNORE INTO dataset_variants
+                (kind_id, wb_id, region, delay, universe,
+                 coverage, value_score, themes, date_coverage,
+                 user_count, alpha_count, field_count, research_papers, raw_data)
+            SELECT
+                substr(wb_id, 1, instr(wb_id, '__') - 1),
+                wb_id, region, delay, universe,
+                coverage, value_score, themes, date_coverage,
+                user_count, alpha_count, field_count, research_papers, raw_data
+            FROM datasets
+            WHERE wb_id LIKE '%__%'
+        """)
+
+        conn.commit()
+        migrated = conn.execute("SELECT COUNT(*) FROM dataset_variants").fetchone()[0]
+        logger.info(f"数据迁移完成: {len(rows)} 种数据集种类, {migrated} 个变体")
+    except Exception as e:
+        logger.warning(f"迁移数据集结构失败: {e}")
 
 
 def get_synced_at(data_type: str) -> str | None:
@@ -268,6 +355,31 @@ def sync_datasets(session) -> int:
             raw = json.dumps(item)
             flat = _flatten(item)
 
+            # 1) 写入 dataset_kinds（唯一种类）
+            conn.execute(
+                """INSERT OR IGNORE INTO dataset_kinds
+                   (id, name, description, category, subcategory, type, raw_data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (ds_id, flat.get("name"), flat.get("description"),
+                 flat.get("category"), flat.get("subcategory"), flat.get("type"), raw),
+            )
+
+            # 2) 写入 dataset_variants（具体变体）
+            conn.execute(
+                """INSERT OR REPLACE INTO dataset_variants
+                   (kind_id, wb_id, region, delay, universe,
+                    coverage, value_score, themes, date_coverage,
+                    user_count, alpha_count, field_count, research_papers, raw_data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ds_id, composite_id, flat.get("region"), flat.get("delay"),
+                 flat.get("universe"),
+                 flat.get("coverage"), flat.get("valueScore"),
+                 flat.get("themes"), flat.get("dateCoverage"),
+                 flat.get("userCount"), flat.get("alphaCount"),
+                 flat.get("fieldCount"), flat.get("researchPapers"), raw),
+            )
+
+            # 3) 写入旧表保持向后兼容
             existing = conn.execute(
                 "SELECT 1 FROM datasets WHERE wb_id = ?",
                 (composite_id,),
@@ -320,6 +432,10 @@ def sync_datasets(session) -> int:
 def get_cached_datasets(region: str | None = None,
                         delay: int | None = None,
                         universe: str | None = None) -> list[dict]:
+    """
+    从 dataset_variants 查询已缓存的数据集变体。
+    返回 raw_data 列表（与旧格式兼容）。
+    """
     where = []
     params = []
     if region:
@@ -331,12 +447,45 @@ def get_cached_datasets(region: str | None = None,
     if universe:
         where.append("universe = ?")
         params.append(universe)
-    sql = "SELECT raw_data FROM datasets"
+    sql = "SELECT raw_data FROM dataset_variants"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY name"
+    sql += " ORDER BY wb_id"
     rows = _get_conn().execute(sql, params).fetchall()
+    if not rows:
+        # fallback: 旧表
+        sql = "SELECT raw_data FROM datasets"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY wb_id"
+        rows = _get_conn().execute(sql, params).fetchall()
     return [json.loads(r["raw_data"]) for r in rows]
+
+
+def get_cached_dataset_kinds() -> list[dict]:
+    """返回所有已缓存的 dataset_kinds 列表（含变体数）。"""
+    rows = _get_conn().execute("""
+        SELECT k.id, k.name, k.description, k.category, k.subcategory, k.type,
+               (SELECT COUNT(*) FROM dataset_variants v WHERE v.kind_id = k.id) as variant_count,
+               (SELECT COUNT(*) FROM fields f WHERE f.dataset_id = k.id) as field_count
+        FROM dataset_kinds k
+        ORDER BY k.name
+    """).fetchall()
+    if not rows:
+        return []
+    results = []
+    for r in rows:
+        d = dict(r)
+        # 反序列化 JSON 字段便于前端直接使用
+        for field in ("category", "subcategory"):
+            val = d.get(field)
+            if val and isinstance(val, str):
+                try:
+                    d[field] = json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        results.append(d)
+    return results
 
 
 # ── Fields ─────────────────────────────────────────────────
@@ -345,22 +494,36 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
     import time
     conn = _get_conn()
     total = 0
-    datasets = get_cached_datasets()
-    seen = set()
-    logger.info(f"开始同步字段数据... datasets_count={len(datasets)} dataset_id={dataset_id}")
-    for ds in datasets:
-        d_id = ds.get("id", "")
+    # 按种类去重，每种只需同步一次（字段按 kind_id 存储）
+    rows = conn.execute("""
+        SELECT kind_id, region, delay, universe
+        FROM dataset_variants
+        GROUP BY kind_id
+        ORDER BY kind_id
+    """).fetchall()
+    if not rows:
+        # fallback: 旧表（向后兼容）
+        fallback_rows = _get_conn().execute("""
+            SELECT
+                substr(wb_id, 1, instr(wb_id, '__') - 1) as kind_id,
+                region, delay, universe
+            FROM datasets WHERE wb_id LIKE '%__%'
+            GROUP BY kind_id
+        """).fetchall()
+        if not fallback_rows:
+            return 0
+        rows = fallback_rows
+
+    logger.info(f"开始同步字段数据... datasets_count={len(rows)} dataset_id={dataset_id}")
+    for row in rows:
+        d_id = row["kind_id"]
         if not d_id:
             continue
         if dataset_id and d_id != dataset_id:
             continue
-        region = ds.get("region")
-        delay = ds.get("delay")
-        universe = ds.get("universe")
-        combo_key = f"{d_id}|{region}|{delay}|{universe}"
-        if combo_key in seen:
-            continue
-        seen.add(combo_key)
+        region = row["region"]
+        delay = row["delay"]
+        universe = row["universe"]
         if not region or delay is None or not universe:
             continue
 
@@ -381,11 +544,11 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
                 dataset_id=d_id, limit=limit, offset=offset,
             )
             if not resp.ok:
-                logger.warning(f"fields API error: {resp.status_code} {resp.text[:200]} for {combo_key}")
+                logger.warning(f"fields API error: {resp.status_code} {resp.text[:200]} for {d_id}/{region}/{delay}/{universe}")
                 break
             data = resp.json()
             if isinstance(data, list):
-                logger.warning(f"fields API returned list (likely error): {data} for {combo_key}")
+                logger.warning(f"fields API returned list (likely error): {data} for {d_id}/{region}/{delay}/{universe}")
                 break
             items = data.get("results") or []
             if not items:
@@ -428,13 +591,13 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
             # 判断是否最后一页：API 返回总数 或 返回数不足 limit
             total_count = data.get("count", data.get("total", 0))
             if total_count and offset + len(items) >= total_count:
-                logger.info(f"字段分页结束（总数）: {combo_key} offset={offset} total={total_count}")
+                logger.info(f"字段分页结束（总数）: {d_id}/{region}/{delay}/{universe} offset={offset} total={total_count}")
                 break
             if len(items) < limit:
                 break
             offset += limit
         else:
-            logger.warning(f"字段同步超过最大页数限制 ({max_pages})，强制终止: {combo_key}")
+            logger.warning(f"字段同步超过最大页数限制 ({max_pages})，强制终止: {d_id}/{region}/{delay}/{universe}")
 
 
 def get_cached_fields(dataset_id: str | None = None) -> list[dict]:
@@ -633,15 +796,18 @@ def get_cached_alphas() -> list[dict]:
 def get_stats() -> dict:
     conn = _get_conn()
     op_count = conn.execute("SELECT COUNT(*) FROM operators").fetchone()[0]
-    ds_count = conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0]
+    ds_variants = conn.execute("SELECT COUNT(*) FROM dataset_variants").fetchone()[0]
+    ds_kinds = conn.execute("SELECT COUNT(*) FROM dataset_kinds").fetchone()[0]
     f_count = conn.execute("SELECT COUNT(*) FROM fields").fetchone()[0]
     a_count = conn.execute("SELECT COUNT(*) FROM alphas").fetchone()[0]
     sync_rows = conn.execute("SELECT * FROM sync_meta").fetchall()
     last_sync = {row["data_type"]: row["synced_at"] for row in sync_rows}
-    logger.info(f"查询缓存统计: operators={op_count} datasets={ds_count} fields={f_count} alphas={a_count} last_sync={last_sync}")
+    logger.info(f"查询缓存统计: operators={op_count} dataset_kinds={ds_kinds} dataset_variants={ds_variants} fields={f_count} alphas={a_count} last_sync={last_sync}")
     return {
         "operators": op_count,
-        "datasets": ds_count,
+        "dataset_kinds": ds_kinds,
+        "dataset_variants": ds_variants,
+        "datasets": ds_variants,  # 向后兼容
         "fields": f_count,
         "alphas": a_count,
         "last_sync": last_sync,

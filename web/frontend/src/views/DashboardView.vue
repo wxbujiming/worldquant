@@ -3,6 +3,47 @@
     <n-h2>仪表盘</n-h2>
     <n-p depth="3">WorldQuant Brain Web 管理界面</n-p>
 
+    <n-card v-if="profile || simQuota" style="margin-bottom: 16px">
+      <n-grid :cols="6" x-gap="16" y-gap="12">
+        <n-gi>
+          <n-statistic label="剩余模拟测试次数">
+            <template #default>
+              <span v-if="simQuota?.remaining != null" style="font-size: 24px; font-weight: 700; color: #2d8cf0">
+                {{ simQuota.remaining }}
+              </span>
+              <span v-else>—</span>
+            </template>
+          </n-statistic>
+        </n-gi>
+        <n-gi>
+          <n-statistic label="分数">
+            <template #default>
+              <n-number-animation :from="0" :to="profile?.score ?? 0" />
+            </template>
+          </n-statistic>
+        </n-gi>
+        <n-gi>
+          <n-statistic label="等级">
+            <template #default>
+              <n-tag v-if="profile?.level" :type="levelTagType(profile.level)" size="large" style="font-size: 16px; font-weight: bold">
+                {{ profile.level }}
+              </n-tag>
+              <span v-else>—</span>
+            </template>
+          </n-statistic>
+        </n-gi>
+        <n-gi>
+          <n-statistic label="已提交 Alpha" :value="profile?.submittedAlphas ?? 0" />
+        </n-gi>
+        <n-gi>
+          <n-statistic label="排名" :value="profile?.rank ?? '—'" />
+        </n-gi>
+        <n-gi>
+          <n-statistic label="用户 ID" :value="profile?.id ?? '—'" />
+        </n-gi>
+      </n-grid>
+    </n-card>
+
     <n-space justify="space-between" style="margin-top: 16px">
       <span></span>
       <n-button size="small" @click="refreshStats" :loading="loading">
@@ -61,9 +102,22 @@ import {
   syncAlphas,
   getCachedAlphas,
 } from "@/api/cache";
+import { getUserProfile, getSimulationQuota } from "@/api/auth";
 
 const message = useMessage();
 const loading = ref(false);
+const profile = ref<any>(null);
+const simQuota = ref<any>(null);
+
+const levelColors: Record<string, string> = {
+  BRONZE: "warning",
+  SILVER: "info",
+  GOLD: "success",
+  PLATINUM: "primary",
+};
+function levelTagType(level: string) {
+  return levelColors[level] || "default";
+}
 
 const stats = reactive({
   operators: 0,
@@ -329,8 +383,24 @@ function renderBlockingChart(alphaList: any[]) {
   });
 }
 
+async function loadProfile() {
+  try {
+    const res = await getUserProfile();
+    profile.value = res.data;
+  } catch { /* 未登录 */ }
+}
+
+async function loadQuota() {
+  try {
+    const res = await getSimulationQuota();
+    simQuota.value = res.data;
+  } catch { /* 未登录 */ }
+}
+
 onMounted(() => {
   refreshStats();
+  loadProfile();
+  loadQuota();
   loadColorChart();
   window.addEventListener("resize", handleResize);
 });

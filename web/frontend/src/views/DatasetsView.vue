@@ -1,41 +1,19 @@
 <template>
   <div>
     <n-h2>数据集</n-h2>
+    <n-p depth="3">共 {{ kinds.length }} 种数据集（含 {{ totalVariants }} 个配置变体）</n-p>
 
     <n-card style="margin-bottom: 16px">
       <n-grid :cols="24" x-gap="12" y-gap="12">
-        <n-gi :span="6">
-          <n-select
-            v-model:value="filters.region"
-            :options="regionOptions"
-            placeholder="Region"
-            filterable
+        <n-gi :span="8">
+          <n-input
+            v-model:value="searchText"
+            placeholder="搜索数据集名称..."
             clearable
+            @input="handleSearch"
           />
         </n-gi>
-        <n-gi :span="6">
-          <n-select
-            v-model:value="filters.delay"
-            :options="delayOptions"
-            placeholder="Delay"
-            clearable
-          />
-        </n-gi>
-        <n-gi :span="6">
-          <n-select
-            v-model:value="filters.universe"
-            :options="universeOptions"
-            placeholder="Universe"
-            filterable
-            clearable
-          />
-        </n-gi>
-        <n-gi :span="3">
-          <n-button type="primary" @click="handleSearch" :loading="loading" block>
-            搜索
-          </n-button>
-        </n-gi>
-        <n-gi :span="3">
+        <n-gi :span="3" :offset="13">
           <n-button @click="handleSync" :loading="syncing" block>
             同步
           </n-button>
@@ -45,138 +23,95 @@
 
     <n-data-table
       :columns="columns"
-      :data="datasets"
+      :data="filteredKinds"
       :loading="loading"
       :pagination="pagination"
       :bordered="false"
       :single-line="false"
       size="small"
       striped
-      :scroll-x="1400"
     />
 
-    <n-card v-if="!loading && datasets.length === 0" style="margin-top: 16px">
+    <n-card v-if="!loading && filteredKinds.length === 0" style="margin-top: 16px">
       <n-empty description="无数据" />
     </n-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { h, ref, reactive, onMounted } from "vue";
+import { h, ref, reactive, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useMessage } from "naive-ui";
 import type { DataTableColumn } from "naive-ui";
 import { NTag, NButton } from "naive-ui";
-import { getCachedDatasets, syncDatasets } from "@/api/cache";
+import { getCachedDatasetKinds } from "@/api/cache";
 
 const router = useRouter();
 const message = useMessage();
 
 const loading = ref(true);
 const syncing = ref(false);
-const datasets = ref<any[]>([]);
+const kinds = ref<any[]>([]);
+const searchText = ref("");
 
-const filters = reactive({
-  region: null,
-  delay: null,
-  universe: null,
+const filteredKinds = computed(() => {
+  if (!searchText.value) return kinds.value;
+  const q = searchText.value.toLowerCase();
+  return kinds.value.filter((k: any) =>
+    (k.name || "").toLowerCase().includes(q) ||
+    (k.id || "").toLowerCase().includes(q)
+  );
 });
 
-const regionOptions = [
-  { label: "USA", value: "usa" },
-  { label: "Europe", value: "eur" },
-  { label: "Asia", value: "asia" },
-  { label: "Global", value: "global" },
-];
-
-const delayOptions = [0, 1, 2, 3, 4].map((v) => ({ label: `${v}`, value: v }));
-
-const universeOptions = [
-  { label: "TOP3000", value: "top3000" },
-  { label: "TOP2000", value: "top2000" },
-  { label: "TOP1000", value: "top1000" },
-  { label: "TOP500", value: "top500" },
-  { label: "TOP200", value: "top200" },
-  { label: "TOPSP500", value: "topsp500" },
-];
+const totalVariants = computed(() =>
+  kinds.value.reduce((sum: number, k: any) => sum + (k.variant_count || 0), 0)
+);
 
 const columns: DataTableColumn[] = [
-  { title: "ID", key: "id", width: 80 },
+  { title: "ID", key: "id", width: 100 },
   { title: "名称", key: "name", ellipsis: { tooltip: true } },
-  {
-    title: "区域",
-    key: "region",
-    width: 80,
-    render: (row: any) =>
-      h(NTag, { size: "small", type: "info" }, { default: () => row.region }),
-  },
-  {
-    title: "延迟",
-    key: "delay",
-    width: 70,
-    render: (row: any) => `D${row.delay}`,
-  },
-  {
-    title: "股票池",
-    key: "universe",
-    width: 100,
-    render: (row: any) =>
-      h(NTag, { size: "small" }, { default: () => row.universe }),
-  },
   {
     title: "分类",
     key: "category",
-    width: 100,
+    width: 120,
     render: (row: any) => {
       const cat = row.category;
       const label = typeof cat === "object" ? cat?.name || cat?.id : cat;
-      return label ? h(NTag, { size: "small" }, { default: () => label }) : "";
+      return label ? h(NTag, { size: "small" }, { default: () => label }) : "—";
     },
   },
   {
-    title: "覆盖度",
-    key: "coverage",
-    width: 90,
-    sorter: (a: any, b: any) => (a.coverage ?? 0) - (b.coverage ?? 0),
+    title: "子类",
+    key: "subcategory",
+    width: 140,
+    ellipsis: { tooltip: true },
     render: (row: any) => {
-      const v = row.coverage;
-      if (v == null) return "—";
-      const pct = (v * 100).toFixed(1);
-      const color = v >= 0.8 ? "success" : v >= 0.5 ? "warning" : "error";
-      return h(NTag, { size: "small", type: color }, { default: () => `${pct}%` });
+      const sub = row.subcategory;
+      const label = typeof sub === "object" ? sub?.name || sub?.id : sub;
+      return label ?? "—";
     },
   },
   {
-    title: "价值评分",
-    key: "valueScore",
-    width: 90,
-    sorter: (a: any, b: any) => (a.valueScore ?? 0) - (b.valueScore ?? 0),
-    render: (row: any) => row.valueScore?.toFixed(2) ?? "—",
+    title: "描述",
+    key: "description",
+    ellipsis: { tooltip: true },
+    minWidth: 200,
   },
   {
-    title: "Alpha 数",
-    key: "alphaCount",
-    width: 90,
-    sorter: (a: any, b: any) => (a.alphaCount ?? 0) - (b.alphaCount ?? 0),
-  },
-  {
-    title: "用户数",
-    key: "userCount",
+    title: "变体数",
+    key: "variant_count",
     width: 80,
-    sorter: (a: any, b: any) => (a.userCount ?? 0) - (b.userCount ?? 0),
+    sorter: (a: any, b: any) => (a.variant_count ?? 0) - (b.variant_count ?? 0),
+    render: (row: any) =>
+      h(NTag, { size: "small", type: "primary" }, { default: () => String(row.variant_count ?? 0) }),
   },
   {
     title: "字段数",
-    key: "fieldCount",
+    key: "field_count",
     width: 80,
-    sorter: (a: any, b: any) => (a.fieldCount ?? 0) - (b.fieldCount ?? 0),
-  },
-  {
-    title: "日期覆盖",
-    key: "dateCoverage",
-    width: 100,
-    sorter: (a: any, b: any) => (a.dateCoverage ?? 0) - (b.dateCoverage ?? 0),
-    render: (row: any) => row.dateCoverage?.toFixed(1) ?? "—",
+    sorter: (a: any, b: any) => (a.field_count ?? 0) - (b.field_count ?? 0),
+    render: (row: any) =>
+      h(NTag, { size: "small", type: "info" }, { default: () => String(row.field_count ?? 0) }),
   },
   {
     title: "操作",
@@ -202,19 +137,18 @@ const pagination = reactive({
   pageSize: 50,
   onChange: (page: number) => {
     pagination.page = page;
-    handleSearch();
   },
 });
 
-async function handleSearch() {
+function handleSearch() {
+  pagination.page = 1;
+}
+
+async function loadKinds() {
   loading.value = true;
   try {
-    const res = await getCachedDatasets({
-      region: filters.region,
-      delay: filters.delay,
-      universe: filters.universe,
-    });
-    datasets.value = res.data.results ?? [];
+    const res = await getCachedDatasetKinds();
+    kinds.value = res.data.results ?? [];
   } catch (err: any) {
     message.error(err?.response?.data?.detail || "查询失败");
   } finally {
@@ -225,9 +159,10 @@ async function handleSearch() {
 async function handleSync() {
   syncing.value = true;
   try {
+    const { syncDatasets } = await import("@/api/cache");
     const res = await syncDatasets();
     message.success(res.data.message);
-    await handleSearch();
+    await loadKinds();
   } catch (err: any) {
     message.error(err?.response?.data?.detail || "同步失败");
   } finally {
@@ -235,5 +170,5 @@ async function handleSync() {
   }
 }
 
-onMounted(handleSearch);
+onMounted(loadKinds);
 </script>

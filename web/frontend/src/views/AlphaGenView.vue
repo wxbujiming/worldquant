@@ -228,7 +228,6 @@ import { ref, reactive, onMounted, h } from "vue";
 import { useMessage } from "naive-ui";
 import type { DataTableColumn } from "naive-ui";
 import { NTag, NButton, NSpace } from "naive-ui";
-import { getCachedDatasets } from "@/api/cache";
 import {
   generateStage1,
   generateStage2,
@@ -474,15 +473,11 @@ async function copyFormula(formula: string) {
 // ── 初始化 ──
 onMounted(async () => {
   try {
-    const res = await getCachedDatasets();
+    const { getCachedDatasetKinds } = await import("@/api/cache");
+    const res = await getCachedDatasetKinds();
     const items: any[] = res.data.results ?? [];
-    const seen = new Set<string>();
     for (const ds of items) {
-      const name = ds.name || ds.id;
-      if (name && !seen.has(name)) {
-        seen.add(name);
-        datasetOptions.value.push({ label: `${name} (${ds.region})`, value: ds.id });
-      }
+      datasetOptions.value.push({ label: ds.id, value: ds.id });
     }
   } catch {
     message.error("加载数据集列表失败");

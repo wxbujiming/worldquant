@@ -11,6 +11,7 @@ from ..services.cache_service import (
     sync_alphas,
     get_cached_operators,
     get_cached_datasets,
+    get_cached_dataset_kinds,
     get_cached_fields,
     get_cached_alphas,
     get_synced_at,
@@ -97,6 +98,14 @@ def cached_datasets(
         universe = universe.upper()
     items = get_cached_datasets(region, delay, universe)
     logger.info(f"查询缓存数据集: {len(items)} 条 (region={region} delay={delay} universe={universe})")
+    return {"results": items, "count": len(items), "cached": True}
+
+
+@router.get("/dataset-kinds")
+def cached_dataset_kinds():
+    init_db()
+    items = get_cached_dataset_kinds()
+    logger.info(f"查询缓存数据集种类: {len(items)} 条")
     return {"results": items, "count": len(items), "cached": True}
 
 
