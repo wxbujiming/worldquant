@@ -20,7 +20,7 @@
         <n-statistic label="数据集 ID" :value="dataset.id" />
       </n-gi>
       <n-gi>
-        <n-statistic label="研究论文" :value="dataset.researchPapers ?? 0" />
+        <n-statistic label="研究论文" :value="Array.isArray(dataset.researchPapers) ? dataset.researchPapers.length : dataset.researchPapers ?? 0" />
       </n-gi>
     </n-grid>
 
@@ -97,26 +97,54 @@ const fieldsPageCount = computed(() => {
 });
 
 const dataColumns: DataTableColumn[] = [
-  { title: "区域", key: "region", width: 80 },
-  { title: "延迟", key: "delay", width: 70 },
-  { title: "股票池", key: "universe", width: 100 },
+  { title: "区域", key: "region", width: 80,
+    render: (row: any) =>
+      h(NTag, { size: "small", type: "info" }, { default: () => row.region }),
+  },
+  { title: "延迟", key: "delay", width: 70,
+    render: (row: any) => `D${row.delay}`,
+  },
+  { title: "股票池", key: "universe", width: 100,
+    render: (row: any) =>
+      h(NTag, { size: "small" }, { default: () => row.universe }),
+  },
   {
     title: "覆盖度",
     key: "coverage",
-    width: 90,
-    render: (row: any) =>
-      row.coverage != null ? `${(row.coverage * 100).toFixed(1)}%` : "—",
+    width: 100,
+    sorter: (a: any, b: any) => (a.coverage ?? 0) - (b.coverage ?? 0),
+    render: (row: any) => {
+      const v = row.coverage;
+      if (v == null) return "—";
+      const pct = (v * 100).toFixed(1);
+      const color = v >= 0.8 ? "success" : v >= 0.5 ? "warning" : "error";
+      return h(NTag, { size: "small", type: color }, { default: () => `${pct}%` });
+    },
   },
   {
     title: "价值评分",
     key: "valueScore",
     width: 100,
+    sorter: (a: any, b: any) => (a.valueScore ?? 0) - (b.valueScore ?? 0),
     render: (row: any) => row.valueScore?.toFixed(2) ?? "—",
   },
-  { title: "Alpha 数", key: "alphaCount", width: 90 },
-  { title: "用户数", key: "userCount", width: 80 },
-  { title: "字段数", key: "fieldCount", width: 80 },
-  { title: "日期覆盖", key: "dateCoverage", width: 90 },
+  {
+    title: "Alpha 数", key: "alphaCount", width: 90,
+    sorter: (a: any, b: any) => (a.alphaCount ?? 0) - (b.alphaCount ?? 0),
+  },
+  {
+    title: "用户数", key: "userCount", width: 80,
+    sorter: (a: any, b: any) => (a.userCount ?? 0) - (b.userCount ?? 0),
+  },
+  {
+    title: "字段数", key: "fieldCount", width: 80,
+    sorter: (a: any, b: any) => (a.fieldCount ?? 0) - (b.fieldCount ?? 0),
+  },
+  {
+    title: "日期覆盖", key: "dateCoverage", width: 100,
+    sorter: (a: any, b: any) => (a.dateCoverage ?? 0) - (b.dateCoverage ?? 0),
+    render: (row: any) => row.dateCoverage?.toFixed(1) ?? "—",
+  },
 ];
 
 const fieldColumns: DataTableColumn[] = [

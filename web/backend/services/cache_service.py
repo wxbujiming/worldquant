@@ -117,6 +117,7 @@ def init_db():
     """)
     conn.commit()
     _migrate_datasets_schema(conn)
+    _migrate_alphas_schema(conn)
     logger.info(f"数据库初始化完成: {DB_PATH}")
 
 
@@ -146,6 +147,15 @@ def _migrate_datasets_schema(conn):
            WHERE description IS NULL"""
     )
     conn.commit()
+
+
+def _migrate_alphas_schema(conn):
+    """为 alphas 表添加 wb_id 唯一索引，支持 UPSERT。"""
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_alphas_wb_id ON alphas(wb_id)")
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"创建 alphas 索引失败: {e}")
 
 
 def get_synced_at(data_type: str) -> str | None:
@@ -448,74 +458,170 @@ def get_cached_fields(dataset_id: str | None = None) -> list[dict]:
 
 def sync_alphas(session) -> int:
     import time
+    import datetime
     conn = _get_conn()
+
+    # 增量同步：按创建时间排序，取近 3 天数据
+    # 用 date_created 而非 date_submitted，确保未提交的新 Alpha 也能被同步
+    _EASTERN = datetime.timezone(datetime.timedelta(hours=-4))
+    SYNC_DAYS = 3
+    last_sync = get_synced_at("alphas")
+    if last_sync:
+        sync_since = datetime.datetime.now(_EASTERN) - datetime.timedelta(days=SYNC_DAYS)
+        logger.info(f"增量同步 Alpha (since {sync_since})...")
+    else:
+        sync_since = None
+        logger.info("全量同步 Alpha...")
+
     count = 0
     offset = 0
     limit = 100
-    seen_ids: set[str] = set()
-    logger.info("开始同步 Alpha 数据...")
+
+    # 加载本地缓存 ID 索引，用于快速判重
+    local_ids: set[str] = set()
+    local_status: dict[str, tuple[str | None, str | None]] = {}
+    if sync_since is not None:
+        rows = conn.execute(
+            "SELECT wb_id, status, date_submitted FROM alphas WHERE date_created >= ?",
+            (sync_since.isoformat(),),
+        ).fetchall()
+        for r in rows:
+            local_ids.add(r["wb_id"])
+            local_status[r["wb_id"]] = (r["status"], r["date_submitted"])
+    else:
+        rows = conn.execute(
+            "SELECT wb_id, status, date_submitted FROM alphas"
+        ).fetchall()
+        for r in rows:
+            local_ids.add(r["wb_id"])
+            local_status[r["wb_id"]] = (r["status"], r["date_submitted"])
+    logger.info(f"已加载 {len(local_ids)} 条本地缓存索引")
+
+    def _parse_dt_aware(s: str) -> datetime.datetime | None:
+        """解析 ISO 时间字符串，保持时区信息。"""
+        try:
+            return datetime.datetime.fromisoformat(s)
+        except (ValueError, TypeError):
+            return None
+
     while True:
-        resp = session.filter_alphas_limited(limit=limit, offset=offset)
+        kwargs = dict(limit=limit, offset=offset)
+        if sync_since is not None:
+            kwargs["order"] = "-dateCreated"
+
+        resp = session.filter_alphas_limited(**kwargs)
         data = resp.json()
-        items = data.get("results") or data.get("alphas") or []
+        if isinstance(data, list):
+            items = [item for item in data if isinstance(item, dict)]
+        elif isinstance(data, dict):
+            items = data.get("results") or data.get("alphas") or []
+        else:
+            items = []
         if not items:
             break
 
-        # 检测是否循环到重复数据（API 越界后可能重复返回）
-        batch_ids = {str(item.get("id", "")) for item in items if item.get("id")}
-        if batch_ids and batch_ids.issubset(seen_ids):
-            logger.info(f"检测到重复数据，同步结束 (offset={offset})")
-            break
-        seen_ids.update(batch_ids)
+        # 本地按创建时间过滤
+        if sync_since is not None:
+            filtered = []
+            for item in items:
+                dc = item.get("dateCreated") or item.get("date_created")
+                if dc:
+                    dc_dt = _parse_dt_aware(dc)
+                    if dc_dt and dc_dt >= sync_since:
+                        filtered.append(item)
+                else:
+                    filtered.append(item)
+            if not filtered:
+                logger.info(f"增量同步结束：后续创建时间均早于 {sync_since} (offset={offset})")
+                break
+            items = filtered
 
+        # 对比本地缓存，只处理新增和状态变化的
+        batch_rows = []
+        batch_new_ids = []
+        all_existing = True
         for item in items:
             a_id = str(item.get("id", ""))
             if not a_id:
                 continue
-            raw = json.dumps(item)
-            flat = _flatten(item)
+            if a_id in local_ids:
+                old_status, old_ds = local_status.get(a_id, (None, None))
+                new_status = item.get("status")
+                new_ds = item.get("dateSubmitted") or item.get("date_submitted")
+                if old_status != new_status or old_ds != new_ds:
+                    all_existing = False
+                    flat = _flatten(item)
+                    batch_rows.append((
+                        a_id,
+                        flat.get("name"), flat.get("grade"), flat.get("color"),
+                        flat.get("status"), flat.get("dateCreated"), flat.get("stage"),
+                        flat.get("tags"), flat.get("regular"), flat.get("settings"),
+                        flat.get("is"),
+                        flat.get("type"), flat.get("author"), flat.get("dateSubmitted"),
+                        flat.get("train"), flat.get("test"), json.dumps(item),
+                    ))
+                    batch_new_ids.append(a_id)
+                    local_status[a_id] = (new_status, new_ds)
+            else:
+                all_existing = False
+                flat = _flatten(item)
+                batch_rows.append((
+                    a_id,
+                    flat.get("name"), flat.get("grade"), flat.get("color"),
+                    flat.get("status"), flat.get("dateCreated"), flat.get("stage"),
+                    flat.get("tags"), flat.get("regular"), flat.get("settings"),
+                    flat.get("is"),
+                    flat.get("type"), flat.get("author"), flat.get("dateSubmitted"),
+                    flat.get("train"), flat.get("test"), json.dumps(item),
+                ))
+                batch_new_ids.append(a_id)
+                local_ids.add(a_id)
+                local_status[a_id] = (item.get("status"),
+                                      item.get("dateSubmitted") or item.get("date_submitted"))
 
-            existing = conn.execute(
-                "SELECT 1 FROM alphas WHERE wb_id = ?",
-                (a_id,),
-            ).fetchone()
-            if existing:
-                conn.execute(
-                    """UPDATE alphas SET name=?, grade=?, color=?, status=?, date_created=?,
-                       stage=?, tags=?, regular=?, settings=?, is_data=?,
-                       type=?, author=?, date_submitted=?, train=?, test=?, raw_data=?
-                       WHERE wb_id=?""",
-                    (flat.get("name"), flat.get("grade"), flat.get("color"),
-                     flat.get("status"), flat.get("dateCreated"), flat.get("stage"),
-                     flat.get("tags"), flat.get("regular"), flat.get("settings"),
-                     flat.get("is"),
-                     flat.get("type"), flat.get("author"), flat.get("dateSubmitted"),
-                     flat.get("train"), flat.get("test"), raw, a_id),
-                )
-                count += 1
-                continue
+        # 整页都是已缓存无变化数据 → 结束
+        if all_existing:
+            logger.info(f"增量同步结束：后续数据均已缓存 (offset={offset})")
+            break
 
-            conn.execute(
-                """INSERT INTO alphas
-                   (wb_id, name, grade, color, status, date_created, stage, tags,
-                    regular, settings, is_data, type, author, date_submitted, train, test, raw_data)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (a_id, flat.get("name"), flat.get("grade"), flat.get("color"),
-                 flat.get("status"), flat.get("dateCreated"), flat.get("stage"),
-                 flat.get("tags"), flat.get("regular"), flat.get("settings"),
-                 flat.get("is"),
-                 flat.get("type"), flat.get("author"), flat.get("dateSubmitted"),
-                 flat.get("train"), flat.get("test"), raw),
-            )
-            count += 1
+        if not batch_rows:
+            if len(items) < limit:
+                break
+            offset += limit
+            time.sleep(0.5 if sync_since is not None else 1.1)
+            continue
+
+        conn.executemany("""
+            INSERT INTO alphas
+                (wb_id, name, grade, color, status, date_created, stage, tags,
+                 regular, settings, is_data, type, author, date_submitted, train, test, raw_data)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wb_id) DO UPDATE SET
+                name=excluded.name, grade=excluded.grade, color=excluded.color,
+                status=excluded.status, date_created=excluded.date_created,
+                stage=excluded.stage, tags=excluded.tags, regular=excluded.regular,
+                settings=excluded.settings, is_data=excluded.is_data,
+                type=excluded.type, author=excluded.author,
+                date_submitted=excluded.date_submitted, train=excluded.train,
+                test=excluded.test, raw_data=excluded.raw_data
+        """, batch_rows)
+
+        count += len(batch_rows)
         conn.commit()
+
         if len(items) < limit:
             break
         offset += limit
-        time.sleep(1.1)
-    set_synced_at("alphas")
+        time.sleep(0.5 if sync_since is not None else 1.1)
+
+    # 用 conn 直接写入 sync_meta，确保和循环使用同一连接
+    now = datetime.datetime.now().isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO sync_meta (data_type, synced_at) VALUES (?, ?)",
+        ("alphas", now),
+    )
     conn.commit()
-    logger.info(f"Alpha 同步完成: 同步 {count} 条")
+    logger.info(f"Alpha 同步完成: {count} 条 (synced_at={now})")
     return count
 
 

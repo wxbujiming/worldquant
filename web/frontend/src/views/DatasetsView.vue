@@ -51,6 +51,8 @@
       :bordered="false"
       :single-line="false"
       size="small"
+      striped
+      :scroll-x="1400"
     />
 
     <n-card v-if="!loading && datasets.length === 0" style="margin-top: 16px">
@@ -106,7 +108,20 @@ const columns: DataTableColumn[] = [
     key: "region",
     width: 80,
     render: (row: any) =>
-      h(NTag, { size: "small" }, { default: () => row.region }),
+      h(NTag, { size: "small", type: "info" }, { default: () => row.region }),
+  },
+  {
+    title: "延迟",
+    key: "delay",
+    width: 70,
+    render: (row: any) => `D${row.delay}`,
+  },
+  {
+    title: "股票池",
+    key: "universe",
+    width: 100,
+    render: (row: any) =>
+      h(NTag, { size: "small" }, { default: () => row.universe }),
   },
   {
     title: "分类",
@@ -119,22 +134,55 @@ const columns: DataTableColumn[] = [
     },
   },
   {
-    title: "覆盖",
+    title: "覆盖度",
     key: "coverage",
-    width: 80,
-    render: (row: any) =>
-      row.coverage != null ? `${(row.coverage * 100).toFixed(1)}%` : "",
+    width: 90,
+    sorter: (a: any, b: any) => (a.coverage ?? 0) - (b.coverage ?? 0),
+    render: (row: any) => {
+      const v = row.coverage;
+      if (v == null) return "—";
+      const pct = (v * 100).toFixed(1);
+      const color = v >= 0.8 ? "success" : v >= 0.5 ? "warning" : "error";
+      return h(NTag, { size: "small", type: color }, { default: () => `${pct}%` });
+    },
   },
   {
-    title: "评分",
+    title: "价值评分",
     key: "valueScore",
+    width: 90,
+    sorter: (a: any, b: any) => (a.valueScore ?? 0) - (b.valueScore ?? 0),
+    render: (row: any) => row.valueScore?.toFixed(2) ?? "—",
+  },
+  {
+    title: "Alpha 数",
+    key: "alphaCount",
+    width: 90,
+    sorter: (a: any, b: any) => (a.alphaCount ?? 0) - (b.alphaCount ?? 0),
+  },
+  {
+    title: "用户数",
+    key: "userCount",
     width: 80,
-    render: (row: any) => row.valueScore?.toFixed(2) ?? "",
+    sorter: (a: any, b: any) => (a.userCount ?? 0) - (b.userCount ?? 0),
+  },
+  {
+    title: "字段数",
+    key: "fieldCount",
+    width: 80,
+    sorter: (a: any, b: any) => (a.fieldCount ?? 0) - (b.fieldCount ?? 0),
+  },
+  {
+    title: "日期覆盖",
+    key: "dateCoverage",
+    width: 100,
+    sorter: (a: any, b: any) => (a.dateCoverage ?? 0) - (b.dateCoverage ?? 0),
+    render: (row: any) => row.dateCoverage?.toFixed(1) ?? "—",
   },
   {
     title: "操作",
     key: "actions",
     width: 100,
+    fixed: "right",
     render: (row: any) =>
       h(
         NButton,

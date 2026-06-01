@@ -90,6 +90,11 @@ def cached_datasets(
     universe: str | None = None,
 ):
     init_db()
+    # 统一转大写匹配数据库存储格式
+    if region:
+        region = region.upper()
+    if universe:
+        universe = universe.upper()
     items = get_cached_datasets(region, delay, universe)
     logger.info(f"查询缓存数据集: {len(items)} 条 (region={region} delay={delay} universe={universe})")
     return {"results": items, "count": len(items), "cached": True}

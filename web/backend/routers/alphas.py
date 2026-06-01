@@ -1,3 +1,4 @@
+import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from wqb import FilterRange
@@ -6,6 +7,13 @@ from ..log_config import get_logger
 
 logger = get_logger("alphas")
 router = APIRouter(prefix="/api/alphas", tags=["alphas"])
+
+# WB API 使用美东时间
+_EASTERN = datetime.timezone(datetime.timedelta(hours=-4))
+
+
+def _now_eastern() -> datetime.datetime:
+    return datetime.datetime.now(_EASTERN)
 
 
 @router.get("")
@@ -33,6 +41,8 @@ def filter_alphas(
     drawdown_max: float | None = None,
     turnover_min: float | None = None,
     turnover_max: float | None = None,
+    date_created_min: str | None = None,
+    date_created_max: str | None = None,
     order: str | None = None,
     limit: int = Query(100, ge=1, le=100),
     offset: int = Query(0, ge=0),
@@ -63,8 +73,18 @@ def filter_alphas(
         if turnover_min is not None or turnover_max is not None
         else None
     )
+    # 默认按创建时间查询近 3 天，避免翻页超出 API 10000 上限
+    if date_created_min is None and date_created_max is None:
+        date_created = FilterRange(
+            lo=_now_eastern() - datetime.timedelta(days=3),
+            hi=datetime.datetime(9999, 12, 31, tzinfo=_EASTERN),
+        )
+    else:
+        lo = datetime.datetime.fromisoformat(date_created_min) if date_created_min else None
+        hi = datetime.datetime.fromisoformat(date_created_max) if date_created_max else None
+        date_created = FilterRange(lo=lo, hi=hi)
     logger.info(f"过滤 Alpha: name={name} status={status} region={region} delay={delay} "
-                f"universe={universe} limit={limit} offset={offset}")
+                f"universe={universe} date_created={date_created} limit={limit} offset={offset}")
     resp = session.filter_alphas_limited(
         name=name,
         status=status,
@@ -84,11 +104,15 @@ def filter_alphas(
         fitness=fitness,
         drawdown=drawdown,
         turnover=turnover,
+        date_created=date_created,
         order=order,
         limit=limit,
         offset=offset,
     )
     data = resp.json()
+    if isinstance(data, list):
+        logger.info(f"Alpha 过滤完成: 返回 {len(data)} 条 (列表格式)")
+        return {"count": len(data), "results": data}
     logger.info(f"Alpha 过滤完成: 返回 {len(data.get('results', data.get('alphas', [])))} 条")
     return data
 
