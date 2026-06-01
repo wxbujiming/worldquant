@@ -433,6 +433,21 @@ async function handleSearch() {
       items = items.filter((a: any) => a.status === "ACTIVE");
     }
 
+    // 排序：已提交按提交时间倒序，其他按创建时间倒序
+    if (tabValue.value === "submitted") {
+      items.sort((a: any, b: any) => {
+        const da = a.dateSubmitted ? new Date(a.dateSubmitted).getTime() : 0;
+        const db = b.dateSubmitted ? new Date(b.dateSubmitted).getTime() : 0;
+        return db - da;
+      });
+    } else {
+      items.sort((a: any, b: any) => {
+        const da = a.dateCreated ? new Date(a.dateCreated).getTime() : 0;
+        const db = b.dateCreated ? new Date(b.dateCreated).getTime() : 0;
+        return db - da;
+      });
+    }
+
     alphas.value = items;
   } catch (err: any) {
     message.error(err?.response?.data?.detail || "查询失败");

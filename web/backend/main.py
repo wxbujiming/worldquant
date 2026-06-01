@@ -7,7 +7,7 @@ from .config import settings
 from .log_config import get_logger
 from .services.wqb_service import create_session, get_session, destroy_session
 from .services.cache_service import init_db, sync_operators, sync_datasets, sync_fields, get_synced_at
-from .routers import auth, datasets, fields, operators, alphas, simulations, cache
+from .routers import auth, datasets, fields, operators, alphas, simulations, cache, generator
 
 logger = get_logger("main")
 
@@ -54,6 +54,7 @@ app.include_router(operators.router)
 app.include_router(alphas.router)
 app.include_router(simulations.router)
 app.include_router(cache.router)
+app.include_router(generator.router)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if STATIC_DIR.is_dir():

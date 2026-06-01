@@ -96,6 +96,11 @@ const menuOptions: MenuOption[] = [
     key: "simulate",
     icon: renderSvg("M8 5v14l11-7z"),
   },
+  {
+    label: "Alpha 生成",
+    key: "alpha-gen",
+    icon: renderSvg("M22 12h-4l-3 9L9 3l-3 9H2"),
+  },
 ];
 
 const activeKey = computed(() => {
@@ -104,11 +109,7 @@ const activeKey = computed(() => {
 });
 
 function onMenuSelect(key: string) {
-  router.push({ name: capitalize(key) });
-}
-
-function capitalize(s: string) {
-  return s.charAt(0).toUpperCase() + s.slice(1);
+  router.push(`/${key}`);
 }
 
 async function handleLogout() {

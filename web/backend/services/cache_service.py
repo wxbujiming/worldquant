@@ -8,7 +8,6 @@ from ..log_config import get_logger
 logger = get_logger("cache_service")
 DB_DIR = os.path.join(os.path.dirname(__file__), "..", "cache")
 DB_PATH = os.path.join(DB_DIR, "wqb_cache.db")
-BACKUP_PATH = DB_PATH + ".bak"
 _local = threading.local()
 
 
@@ -36,13 +35,6 @@ def _flatten(item: dict) -> dict:
 
 
 def init_db():
-    # 备份旧库
-    if os.path.isfile(DB_PATH) and not os.path.isfile(BACKUP_PATH):
-        try:
-            os.rename(DB_PATH, BACKUP_PATH)
-        except OSError:
-            pass
-
     conn = _get_conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS sync_meta (
@@ -381,7 +373,8 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
 
         offset = 0
         limit = 50
-        while True:
+        max_pages = 200  # 最多 200 页（10000 条），防止死循环
+        for page in range(1, max_pages + 1):
             time.sleep(1.1)
             resp = session.search_fields_limited(
                 region=region, delay=delay, universe=universe,
@@ -397,18 +390,17 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
             items = data.get("results") or []
             if not items:
                 break
+
             for item in items:
                 f_id = str(item.get("id", ""))
                 if not f_id:
                     continue
                 raw = json.dumps(item)
                 flat = _flatten(item)
-
                 ds_id = ""
                 ds_val = item.get("dataset")
                 if isinstance(ds_val, dict):
                     ds_id = ds_val.get("id", "")
-
                 existing = conn.execute(
                     "SELECT name, type, category, coverage FROM fields WHERE wb_id = ?", (f_id,)
                 ).fetchone()
@@ -432,13 +424,17 @@ def sync_fields(session, dataset_id: str | None = None) -> int:
                      flat.get("coverage"), flat.get("dataset"), ds_id, raw),
                 )
                 total += 1
+
+            # 判断是否最后一页：API 返回总数 或 返回数不足 limit
+            total_count = data.get("count", data.get("total", 0))
+            if total_count and offset + len(items) >= total_count:
+                logger.info(f"字段分页结束（总数）: {combo_key} offset={offset} total={total_count}")
+                break
             if len(items) < limit:
                 break
             offset += limit
-    set_synced_at("fields")
-    conn.commit()
-    logger.info(f"字段同步完成: 同步 {total} 条")
-    return total
+        else:
+            logger.warning(f"字段同步超过最大页数限制 ({max_pages})，强制终止: {combo_key}")
 
 
 def get_cached_fields(dataset_id: str | None = None) -> list[dict]:

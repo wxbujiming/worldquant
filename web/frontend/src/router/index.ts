@@ -52,6 +52,11 @@ const routes: RouteRecordRaw[] = [
         name: "Simulate",
         component: () => import("@/views/SimulateView.vue"),
       },
+      {
+        path: "alpha-gen",
+        name: "AlphaGen",
+        component: () => import("@/views/AlphaGenView.vue"),
+      },
     ],
   },
 ];
