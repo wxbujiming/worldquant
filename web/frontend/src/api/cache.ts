@@ -42,8 +42,10 @@ export function updateOperatorRemarks(opId: string, remarks: string) {
   return client.patch(`/cache/operators/${encodeURIComponent(opId)}/remarks`, { remarks });
 }
 
-export function syncAlphas() {
-  return client.post("/cache/sync/alphas");
+export function syncAlphas(sync_date?: string) {
+  return client.post("/cache/sync/alphas", null, {
+    params: { sync_date },
+  });
 }
 
 export function getCachedAlphas() {

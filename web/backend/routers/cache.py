@@ -118,10 +118,13 @@ def cached_fields(dataset_id: str | None = None):
 
 
 @router.post("/sync/alphas")
-def do_sync_alphas(session=Depends(require_session)):
+def do_sync_alphas(
+    sync_date: str | None = Query(None, description="同步起始日期 (ISO 格式，如 2026-06-01)"),
+    session=Depends(require_session),
+):
     init_db()
-    logger.info("开始同步 Alpha...")
-    count = sync_alphas(session)
+    logger.info(f"开始同步 Alpha... sync_date={sync_date}")
+    count = sync_alphas(session, sync_date)
     logger.info(f"Alpha 同步完成: {count} 条")
     return {"message": f"已同步 {count} 个 Alpha"}
 

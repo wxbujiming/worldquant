@@ -615,7 +615,7 @@ def get_cached_fields(dataset_id: str | None = None) -> list[dict]:
 
 # ── Alphas ───────────────────────────────────────────────
 
-def sync_alphas(session) -> int:
+def sync_alphas(session, sync_date: str | None = None) -> int:
     import time
     import datetime
     conn = _get_conn()
@@ -624,14 +624,23 @@ def sync_alphas(session) -> int:
     # 用 date_created 而非 date_submitted，确保未提交的新 Alpha 也能被同步
     _EASTERN = datetime.timezone(datetime.timedelta(hours=-4))
     SYNC_DAYS = 3
-    last_sync = get_synced_at("alphas")
-    if last_sync:
-        sync_since = datetime.datetime.now(_EASTERN) - datetime.timedelta(days=SYNC_DAYS)
-        logger.info(f"增量同步 Alpha (since {sync_since})...")
-    else:
-        sync_since = None
-        logger.info("全量同步 Alpha...")
 
+    if sync_date:
+        # 用户指定日期：同步从该日期到现在的数据
+        sync_since = datetime.datetime.fromisoformat(sync_date)
+        if sync_since.tzinfo is None:
+            sync_since = sync_since.replace(tzinfo=_EASTERN)
+        logger.info(f"指定日期同步 Alpha (since {sync_since})...")
+    else:
+        last_sync = get_synced_at("alphas")
+        if last_sync:
+            sync_since = datetime.datetime.now(_EASTERN) - datetime.timedelta(days=SYNC_DAYS)
+            logger.info(f"增量同步 Alpha (since {sync_since})...")
+        else:
+            sync_since = None
+            logger.info("全量同步 Alpha...")
+
+    is_user_specified = sync_date is not None
     count = 0
     offset = 0
     limit = 100
@@ -738,8 +747,8 @@ def sync_alphas(session) -> int:
                 local_status[a_id] = (item.get("status"),
                                       item.get("dateSubmitted") or item.get("date_submitted"))
 
-        # 整页都是已缓存无变化数据 → 结束
-        if all_existing:
+        # 整页都是已缓存无变化数据 → 结束（仅限默认增量场景，指定日期时需继续扫后面的页）
+        if all_existing and not is_user_specified:
             logger.info(f"增量同步结束：后续数据均已缓存 (offset={offset})")
             break
 
