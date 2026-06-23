@@ -130,16 +130,16 @@
         </n-gi>
       </n-grid>
       <n-grid :cols="24" x-gap="8" y-gap="8" style="margin-top: 8px">
-        <n-gi :span="4">
+        <n-gi :span="10">
           <n-date-picker
-            v-model:value="syncDate"
-            type="date"
-            placeholder="同步起始日期（选填）"
+            v-model:value="syncDateRange"
+            type="daterange"
+            placeholder="同步日期范围（选填，不填则增量同步近5天）"
             clearable
             style="width: 100%"
           />
         </n-gi>
-        <n-gi :span="2" :offset="18">
+        <n-gi :span="2" :offset="12">
           <n-button @click="handleSync" :loading="syncing" block>
             同步
           </n-button>
@@ -179,7 +179,7 @@ const loading = ref(true);
 const syncing = ref(false);
 const alphas = ref<any[]>([]);
 const tabValue = ref("qualified");
-const syncDate = ref<number | null>(null);
+const syncDateRange = ref<[number, number] | null>(null);
 
 const filters = reactive({
   keyword: "",
@@ -469,12 +469,16 @@ async function handleSearch() {
 async function handleSync() {
   syncing.value = true;
   try {
-    let dateStr: string | undefined;
-    if (syncDate.value != null) {
-      const d = new Date(syncDate.value);
-      dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    let fromStr: string | undefined;
+    let toStr: string | undefined;
+    if (syncDateRange.value != null) {
+      const [fromTs, toTs] = syncDateRange.value;
+      const fromD = new Date(fromTs);
+      const toD = new Date(toTs);
+      fromStr = `${fromD.getFullYear()}-${String(fromD.getMonth() + 1).padStart(2, '0')}-${String(fromD.getDate()).padStart(2, '0')}`;
+      toStr = `${toD.getFullYear()}-${String(toD.getMonth() + 1).padStart(2, '0')}-${String(toD.getDate()).padStart(2, '0')}`;
     }
-    const res = await syncAlphas(dateStr);
+    const res = await syncAlphas(fromStr, toStr);
     message.success(res.data.message);
     await handleSearch();
   } catch (err: any) {

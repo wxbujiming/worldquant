@@ -119,12 +119,13 @@ def cached_fields(dataset_id: str | None = None):
 
 @router.post("/sync/alphas")
 def do_sync_alphas(
-    sync_date: str | None = Query(None, description="同步起始日期 (ISO 格式，如 2026-06-01)"),
+    sync_date_from: str | None = Query(None, description="同步起始日期 (ISO 格式，如 2026-06-01)"),
+    sync_date_to: str | None = Query(None, description="同步截止日期 (ISO 格式，如 2026-06-22)"),
     session=Depends(require_session),
 ):
     init_db()
-    logger.info(f"开始同步 Alpha... sync_date={sync_date}")
-    count = sync_alphas(session, sync_date)
+    logger.info(f"开始同步 Alpha... sync_date_from={sync_date_from} sync_date_to={sync_date_to}")
+    count = sync_alphas(session, sync_date_from, sync_date_to)
     logger.info(f"Alpha 同步完成: {count} 条")
     return {"message": f"已同步 {count} 个 Alpha"}
 

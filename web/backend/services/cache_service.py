@@ -615,109 +615,146 @@ def get_cached_fields(dataset_id: str | None = None) -> list[dict]:
 
 # ── Alphas ───────────────────────────────────────────────
 
-def sync_alphas(session, sync_date: str | None = None) -> int:
+def _parse_dt_aware(s: str) -> datetime.datetime | None:
+    """解析 ISO 时间字符串，保持时区信息。"""
+    try:
+        return datetime.datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def sync_alphas(session,
+                sync_date_from: str | None = None,
+                sync_date_to: str | None = None) -> int:
+    """
+    按时间窗口分块同步 Alpha。
+
+    WQB API 的 offset 上限为 10000（filter_alphas_limited 硬编码限制），
+    当 Alpha 条数超过时纯 offset 翻页会死循环。
+    此函数将时间范围拆分为 180 天窗口，每个窗口内用 API 返回的 count 控制翻页，
+    若某窗口超过 9500 条则递归拆分为子窗口，确保永不触及 10000 限制。
+
+    参数:
+        sync_date_from: 起始日期 (ISO 格式 YYYY-MM-DD)，None 则按增量/全量决定
+        sync_date_to:   截止日期 (ISO 格式 YYYY-MM-DD)，None 则到"现在"
+    """
     import time
     import datetime
     conn = _get_conn()
-
-    # 增量同步：按创建时间排序，取近 3 天数据
-    # 用 date_created 而非 date_submitted，确保未提交的新 Alpha 也能被同步
     _EASTERN = datetime.timezone(datetime.timedelta(hours=-4))
-    SYNC_DAYS = 3
+    SYNC_DAYS = 5
+    WINDOW_DAYS = 180
+    MAX_ITEMS_PER_WINDOW = 9500
 
-    if sync_date:
-        # 用户指定日期：同步从该日期到现在的数据
-        sync_since = datetime.datetime.fromisoformat(sync_date)
-        if sync_since.tzinfo is None:
-            sync_since = sync_since.replace(tzinfo=_EASTERN)
-        logger.info(f"指定日期同步 Alpha (since {sync_since})...")
+    # ── 确定时间范围 ────────────────────────────────────────
+    now_et = datetime.datetime.now(_EASTERN)
+    has_from = sync_date_from is not None
+    has_to = sync_date_to is not None
+
+    if has_from:
+        from_dt = datetime.datetime.fromisoformat(sync_date_from)
+        if from_dt.tzinfo is None:
+            from_dt = from_dt.replace(tzinfo=_EASTERN)
     else:
         last_sync = get_synced_at("alphas")
         if last_sync:
-            sync_since = datetime.datetime.now(_EASTERN) - datetime.timedelta(days=SYNC_DAYS)
-            logger.info(f"增量同步 Alpha (since {sync_since})...")
+            from_dt = now_et - datetime.timedelta(days=SYNC_DAYS)
         else:
-            sync_since = None
+            from_dt = datetime.datetime(2018, 1, 1, tzinfo=_EASTERN)
+
+    if has_to:
+        to_dt = datetime.datetime.fromisoformat(sync_date_to)
+        if to_dt.tzinfo is None:
+            to_dt = to_dt.replace(tzinfo=_EASTERN)
+    else:
+        to_dt = now_et
+
+    # 空范围 → 直接返回
+    if from_dt >= to_dt:
+        logger.info("同步范围为空，跳过")
+        return 0
+
+    if has_from or has_to:
+        logger.info(f"指定日期同步 Alpha (from={from_dt.isoformat()} to={to_dt.isoformat()})...")
+    else:
+        last_sync = get_synced_at("alphas")
+        if last_sync:
+            logger.info(f"增量同步 Alpha (since {from_dt.date()})...")
+        else:
             logger.info("全量同步 Alpha...")
 
-    is_user_specified = sync_date is not None
-    count = 0
-    offset = 0
-    limit = 100
+    # ── 拆分 180 天时间窗口 ─────────────────────────────────
+    raw_windows: list[tuple[datetime.datetime, datetime.datetime]] = []
+    cursor = from_dt
+    while cursor < to_dt:
+        end = min(cursor + datetime.timedelta(days=WINDOW_DAYS), to_dt)
+        raw_windows.append((cursor, end))
+        cursor = end
 
-    # 加载本地缓存 ID 索引，用于快速判重
+    # ── 加载本地缓存索引 ────────────────────────────────────
     local_ids: set[str] = set()
     local_status: dict[str, tuple[str | None, str | None]] = {}
-    if sync_since is not None:
-        rows = conn.execute(
-            "SELECT wb_id, status, date_submitted FROM alphas WHERE date_created >= ?",
-            (sync_since.isoformat(),),
-        ).fetchall()
-        for r in rows:
-            local_ids.add(r["wb_id"])
-            local_status[r["wb_id"]] = (r["status"], r["date_submitted"])
-    else:
-        rows = conn.execute(
-            "SELECT wb_id, status, date_submitted FROM alphas"
-        ).fetchall()
-        for r in rows:
-            local_ids.add(r["wb_id"])
-            local_status[r["wb_id"]] = (r["status"], r["date_submitted"])
+    rows = conn.execute(
+        "SELECT wb_id, status, date_submitted FROM alphas"
+    ).fetchall()
+    for r in rows:
+        local_ids.add(r["wb_id"])
+        local_status[r["wb_id"]] = (r["status"], r["date_submitted"])
     logger.info(f"已加载 {len(local_ids)} 条本地缓存索引")
 
-    def _parse_dt_aware(s: str) -> datetime.datetime | None:
-        """解析 ISO 时间字符串，保持时区信息。"""
-        try:
-            return datetime.datetime.fromisoformat(s)
-        except (ValueError, TypeError):
-            return None
+    from wqb.filter_range import FilterRange
 
-    while True:
-        kwargs = dict(limit=limit, offset=offset)
-        if sync_since is not None:
-            kwargs["order"] = "-dateCreated"
+    total_count = 0
 
-        resp = session.filter_alphas_limited(**kwargs)
+    def _window_count(win_start: datetime.datetime,
+                      win_end: datetime.datetime) -> int:
+        """获取一个时间窗口内的 Alpha 总数（一次轻量 API 调用）。"""
+        fr = FilterRange(lo=win_start, hi=win_end, lo_eq=True, hi_eq=False)
+        resp = session.filter_alphas_limited(date_created=fr, limit=1, offset=0)
         data = resp.json()
-        if isinstance(data, list):
-            items = [item for item in data if isinstance(item, dict)]
-        elif isinstance(data, dict):
+        return data.get("count", data.get("total", 0))
+
+    def _sync_window(win_start: datetime.datetime,
+                     win_end: datetime.datetime,
+                     expected: int) -> int:
+        """同步单个时间窗口内的所有 Alpha。"""
+        fr = FilterRange(lo=win_start, hi=win_end, lo_eq=True, hi_eq=False)
+        offset = 0
+        limit = 100
+        win_count = 0
+
+        while offset < expected:
+            resp = session.filter_alphas_limited(
+                date_created=fr, limit=limit, offset=offset,
+                order="-dateCreated",
+            )
+            data = resp.json()
             items = data.get("results") or data.get("alphas") or []
-        else:
-            items = []
-        if not items:
-            break
-
-        # 本地按创建时间过滤
-        if sync_since is not None:
-            filtered = []
-            for item in items:
-                dc = item.get("dateCreated") or item.get("date_created")
-                if dc:
-                    dc_dt = _parse_dt_aware(dc)
-                    if dc_dt and dc_dt >= sync_since:
-                        filtered.append(item)
-                else:
-                    filtered.append(item)
-            if not filtered:
-                logger.info(f"增量同步结束：后续创建时间均早于 {sync_since} (offset={offset})")
+            if not items:
                 break
-            items = filtered
 
-        # 对比本地缓存，只处理新增和状态变化的
-        batch_rows = []
-        batch_new_ids = []
-        all_existing = True
-        for item in items:
-            a_id = str(item.get("id", ""))
-            if not a_id:
-                continue
-            if a_id in local_ids:
-                old_status, old_ds = local_status.get(a_id, (None, None))
-                new_status = item.get("status")
-                new_ds = item.get("dateSubmitted") or item.get("date_submitted")
-                if old_status != new_status or old_ds != new_ds:
-                    all_existing = False
+            batch_rows = []
+            for item in items:
+                a_id = str(item.get("id", ""))
+                if not a_id:
+                    continue
+                if a_id in local_ids:
+                    old_status, old_ds = local_status.get(a_id, (None, None))
+                    new_status = item.get("status")
+                    new_ds = item.get("dateSubmitted") or item.get("date_submitted")
+                    if old_status != new_status or old_ds != new_ds:
+                        flat = _flatten(item)
+                        batch_rows.append((
+                            a_id,
+                            flat.get("name"), flat.get("grade"), flat.get("color"),
+                            flat.get("status"), flat.get("dateCreated"), flat.get("stage"),
+                            flat.get("tags"), flat.get("regular"), flat.get("settings"),
+                            flat.get("is"),
+                            flat.get("type"), flat.get("author"), flat.get("dateSubmitted"),
+                            flat.get("train"), flat.get("test"), json.dumps(item),
+                        ))
+                        local_status[a_id] = (new_status, new_ds)
+                else:
                     flat = _flatten(item)
                     batch_rows.append((
                         a_id,
@@ -728,69 +765,84 @@ def sync_alphas(session, sync_date: str | None = None) -> int:
                         flat.get("type"), flat.get("author"), flat.get("dateSubmitted"),
                         flat.get("train"), flat.get("test"), json.dumps(item),
                     ))
-                    batch_new_ids.append(a_id)
-                    local_status[a_id] = (new_status, new_ds)
-            else:
-                all_existing = False
-                flat = _flatten(item)
-                batch_rows.append((
-                    a_id,
-                    flat.get("name"), flat.get("grade"), flat.get("color"),
-                    flat.get("status"), flat.get("dateCreated"), flat.get("stage"),
-                    flat.get("tags"), flat.get("regular"), flat.get("settings"),
-                    flat.get("is"),
-                    flat.get("type"), flat.get("author"), flat.get("dateSubmitted"),
-                    flat.get("train"), flat.get("test"), json.dumps(item),
-                ))
-                batch_new_ids.append(a_id)
-                local_ids.add(a_id)
-                local_status[a_id] = (item.get("status"),
-                                      item.get("dateSubmitted") or item.get("date_submitted"))
+                    local_ids.add(a_id)
+                    local_status[a_id] = (
+                        item.get("status"),
+                        item.get("dateSubmitted") or item.get("date_submitted"),
+                    )
 
-        # 整页都是已缓存无变化数据 → 结束（仅限默认增量场景，指定日期时需继续扫后面的页）
-        if all_existing and not is_user_specified:
-            logger.info(f"增量同步结束：后续数据均已缓存 (offset={offset})")
-            break
+            if batch_rows:
+                conn.executemany("""
+                    INSERT INTO alphas
+                        (wb_id, name, grade, color, status, date_created, stage, tags,
+                         regular, settings, is_data, type, author, date_submitted,
+                         train, test, raw_data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(wb_id) DO UPDATE SET
+                        name=excluded.name, grade=excluded.grade, color=excluded.color,
+                        status=excluded.status, date_created=excluded.date_created,
+                        stage=excluded.stage, tags=excluded.tags, regular=excluded.regular,
+                        settings=excluded.settings, is_data=excluded.is_data,
+                        type=excluded.type, author=excluded.author,
+                        date_submitted=excluded.date_submitted, train=excluded.train,
+                        test=excluded.test, raw_data=excluded.raw_data
+                """, batch_rows)
+                win_count += len(batch_rows)
+                conn.commit()
 
-        if not batch_rows:
-            if len(items) < limit:
-                break
             offset += limit
-            time.sleep(0.5 if sync_since is not None else 1.1)
-            continue
+            time.sleep(0.5)
 
-        conn.executemany("""
-            INSERT INTO alphas
-                (wb_id, name, grade, color, status, date_created, stage, tags,
-                 regular, settings, is_data, type, author, date_submitted, train, test, raw_data)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(wb_id) DO UPDATE SET
-                name=excluded.name, grade=excluded.grade, color=excluded.color,
-                status=excluded.status, date_created=excluded.date_created,
-                stage=excluded.stage, tags=excluded.tags, regular=excluded.regular,
-                settings=excluded.settings, is_data=excluded.is_data,
-                type=excluded.type, author=excluded.author,
-                date_submitted=excluded.date_submitted, train=excluded.train,
-                test=excluded.test, raw_data=excluded.raw_data
-        """, batch_rows)
+        return win_count
 
-        count += len(batch_rows)
-        conn.commit()
+    def _sync_window_range(win_start: datetime.datetime,
+                           win_end: datetime.datetime) -> int:
+        """
+        递归处理时间窗口：检查数据量，若超过上限则拆分。
+        返回该范围内同步的条数。
+        """
+        count = _window_count(win_start, win_end)
+        if count == 0:
+            return 0
+        if count >= MAX_ITEMS_PER_WINDOW:
+            mid = win_start + (win_end - win_start) / 2
+            logger.info(
+                f"窗口 {win_start.date()}~{win_end.date()} 含 {count} 条"
+                f"，超过上限 {MAX_ITEMS_PER_WINDOW}，拆分为子窗口"
+            )
+            sub1 = _sync_window_range(win_start, mid)
+            sub2 = _sync_window_range(mid, win_end)
+            return sub1 + sub2
+        logger.info(
+            f"同步窗口 {win_start.date()}~{win_end.date()} ({count} 条)..."
+        )
+        return _sync_window(win_start, win_end, count)
 
-        if len(items) < limit:
-            break
-        offset += limit
-        time.sleep(0.5 if sync_since is not None else 1.1)
+    # ── 执行同步 ────────────────────────────────────────────
+    for ws, we in raw_windows:
+        if has_from or has_to:
+            # 用户指定日期 → 检查并拆分大窗口
+            sub_count = _sync_window_range(ws, we)
+            total_count += sub_count
+        else:
+            # 增量同步（5 天），不可能超过 9500 → 直接同步
+            win_count = _window_count(ws, we)
+            if win_count > 0:
+                n = _sync_window(ws, we, win_count)
+                total_count += n
+                logger.info(f"增量窗口 {ws.date()}~{we.date()} 完成 ({n} 条)")
+            else:
+                logger.info(f"增量窗口 {ws.date()}~{we.date()} 无数据")
 
-    # 用 conn 直接写入 sync_meta，确保和循环使用同一连接
-    now = datetime.datetime.now().isoformat()
+    # ── 记录同步时间 ────────────────────────────────────────
+    now_str = datetime.datetime.now().isoformat()
     conn.execute(
         "INSERT OR REPLACE INTO sync_meta (data_type, synced_at) VALUES (?, ?)",
-        ("alphas", now),
+        ("alphas", now_str),
     )
     conn.commit()
-    logger.info(f"Alpha 同步完成: {count} 条 (synced_at={now})")
-    return count
+    logger.info(f"Alpha 同步完成: 共 {total_count} 条 (synced_at={now_str})")
+    return total_count
 
 
 def get_cached_alphas() -> list[dict]:

@@ -42,10 +42,11 @@ export function updateOperatorRemarks(opId: string, remarks: string) {
   return client.patch(`/cache/operators/${encodeURIComponent(opId)}/remarks`, { remarks });
 }
 
-export function syncAlphas(sync_date?: string) {
-  return client.post("/cache/sync/alphas", null, {
-    params: { sync_date },
-  });
+export function syncAlphas(sync_date_from?: string, sync_date_to?: string) {
+  const params: Record<string, string> = {};
+  if (sync_date_from) params.sync_date_from = sync_date_from;
+  if (sync_date_to) params.sync_date_to = sync_date_to;
+  return client.post("/cache/sync/alphas", null, { params });
 }
 
 export function getCachedAlphas() {
