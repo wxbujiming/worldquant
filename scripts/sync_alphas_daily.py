@@ -59,7 +59,7 @@ def main():
     # ── 连接数据库 ──────────────────────────────────────────
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("PRAGMA journal_mode=WAL")
 
     # 确保 alphas 表有 wb_id 唯一索引（支持 UPSERT）
     try:
